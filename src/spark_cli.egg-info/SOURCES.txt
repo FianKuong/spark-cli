@@ -1,9 +1,0 @@
-README.md
-pyproject.toml
-src/spark_cli/__init__.py
-src/spark_cli/cli.py
-src/spark_cli.egg-info/PKG-INFO
-src/spark_cli.egg-info/SOURCES.txt
-src/spark_cli.egg-info/dependency_links.txt
-src/spark_cli.egg-info/entry_points.txt
-src/spark_cli.egg-info/top_level.txt
