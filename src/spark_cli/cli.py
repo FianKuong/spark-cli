@@ -727,6 +727,22 @@ def resolve_bundle(bundle_name: str, modules: dict[str, Module]) -> list[Module]
     return [modules[name] for name in names]
 
 
+def ensure_bundle_modules_available(names: list[str], modules: dict[str, Module]) -> dict[str, Module]:
+    """Populate `modules` with any missing bundle members.
+
+    If a registry entry has a git URL source that has not been cloned yet,
+    this triggers `resolve_install_target`, which clones the source into
+    `~/.spark/modules/<name>/source/` and loads the manifest from there.
+    """
+    augmented = dict(modules)
+    for name in names:
+        if name in augmented:
+            continue
+        module = resolve_install_target(name, augmented)
+        augmented[module.name] = module
+    return augmented
+
+
 def resolve_bundle_names(bundle_name: str) -> list[str]:
     registry = load_registry_definition()
     bundle = registry.get("bundles", {}).get(bundle_name, {})
@@ -1329,7 +1345,9 @@ def cmd_install(args: argparse.Namespace) -> int:
     registry = load_registry_definition()
     resume = getattr(args, "resume", False)
     if args.target in registry.get("bundles", {}):
-        bundle_modules = [modules[name] for name in resolve_bundle_names(args.target)]
+        bundle_names = resolve_bundle_names(args.target)
+        modules = ensure_bundle_modules_available(bundle_names, modules)
+        bundle_modules = [modules[name] for name in bundle_names]
         detect_ingress_owner(bundle_modules)
         for module in bundle_modules:
             validate_manifest_schema(module)
@@ -1404,6 +1422,7 @@ def run_install_commands_with_progress(
 def cmd_setup(args: argparse.Namespace) -> int:
     ensure_state_dirs()
     modules = discover_modules()
+    modules = ensure_bundle_modules_available(resolve_bundle_names(args.bundle), modules)
     bundle = resolve_bundle(args.bundle, modules)
     ingress_owner = detect_ingress_owner(bundle)
     installed_modules = resolve_installed_modules()

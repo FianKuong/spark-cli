@@ -19,6 +19,7 @@ from spark_cli.cli import (
     detect_runtime_binary,
     clone_module_source,
     clone_target_for_module,
+    ensure_bundle_modules_available,
     delete_secret,
     fetch_secret,
     infer_module_name_from_url,
@@ -961,6 +962,23 @@ class SparkCliTests(unittest.TestCase):
                 self.assertTrue(ok)
                 self.assertTrue((cloned / "extra.txt").exists())
                 self.assertEqual(clone_target_for_module("git-demo"), clone_home / "modules" / "git-demo" / "source")
+
+    def test_ensure_bundle_modules_available_calls_resolve_for_missing(self) -> None:
+        existing = make_module("already-here", ["cap.x"])
+
+        def fake_resolver(target: str, modules: dict) -> Module:
+            return make_module(target, ["cap.y"])
+
+        with patch("spark_cli.cli.resolve_install_target", side_effect=fake_resolver):
+            augmented = ensure_bundle_modules_available(
+                ["already-here", "needs-clone-a", "needs-clone-b"],
+                {existing.name: existing},
+            )
+        self.assertEqual(
+            sorted(augmented.keys()),
+            ["already-here", "needs-clone-a", "needs-clone-b"],
+        )
+        self.assertIs(augmented["already-here"], existing)
 
     def test_module_secret_env_bindings_returns_env_var_mapping(self) -> None:
         module = Module(
