@@ -1,0 +1,29 @@
+{
+  "modules": {
+    "spark-telegram-bot": {
+      "source": "C:/Users/USER/Desktop/spark-telegram-bot",
+      "blessed": true,
+      "summary": "Telegram ingress gateway for the Spark starter stack"
+    },
+    "spark-intelligence-builder": {
+      "source": "C:/Users/USER/Desktop/spark-intelligence-builder",
+      "blessed": true,
+      "summary": "Spark runtime core for identity, memory, and routing"
+    },
+    "spawner-ui": {
+      "source": "C:/Users/USER/Desktop/spawner-ui",
+      "blessed": true,
+      "summary": "Execution plane and local dashboard for the Spark starter stack"
+    }
+  },
+  "bundles": {
+    "telegram-starter": {
+      "modules": [
+        "spark-telegram-bot",
+        "spark-intelligence-builder",
+        "spawner-ui"
+      ],
+      "summary": "Telegram gateway + Builder runtime + Spawner execution plane"
+    }
+  }
+}

@@ -20,21 +20,8 @@ LOG_DIR = SPARK_HOME / "logs"
 REGISTRY_PATH = STATE_DIR / "installed.json"
 CONFIG_PATH = STATE_DIR / "setup.json"
 PID_PATH = STATE_DIR / "pids.json"
-
-
-DEFAULT_MODULE_PATHS = {
-    "spark-telegram-bot": Path("C:/Users/USER/Desktop/spark-telegram-bot"),
-    "spark-intelligence-builder": Path("C:/Users/USER/Desktop/spark-intelligence-builder"),
-    "spawner-ui": Path("C:/Users/USER/Desktop/spawner-ui"),
-}
-
-BUNDLES = {
-    "telegram-starter": [
-        "spark-telegram-bot",
-        "spark-intelligence-builder",
-        "spawner-ui",
-    ]
-}
+REPO_ROOT = Path(__file__).resolve().parents[2]
+LOCAL_REGISTRY_PATH = REPO_ROOT / "registry.json"
 
 
 @dataclass
@@ -96,6 +83,10 @@ class Module:
         return dict(self.manifest.get("profiles", {}).get("telegram_starter", {}))
 
 
+def load_registry_definition() -> dict[str, Any]:
+    return load_json(LOCAL_REGISTRY_PATH, {"modules": {}, "bundles": {}})
+
+
 def ensure_state_dirs() -> None:
     for path in (SPARK_HOME, STATE_DIR, LOG_DIR):
         path.mkdir(parents=True, exist_ok=True)
@@ -121,7 +112,9 @@ def load_module(path: Path) -> Module:
 
 def discover_modules() -> dict[str, Module]:
     modules: dict[str, Module] = {}
-    for name, path in DEFAULT_MODULE_PATHS.items():
+    registry = load_registry_definition()
+    for name, metadata in registry.get("modules", {}).items():
+        path = Path(str(metadata.get("source", "")))
         manifest_path = path / "spark.toml"
         if manifest_path.exists():
             module = load_module(path)
@@ -130,7 +123,9 @@ def discover_modules() -> dict[str, Module]:
 
 
 def resolve_bundle(bundle_name: str, modules: dict[str, Module]) -> list[Module]:
-    names = BUNDLES.get(bundle_name)
+    registry = load_registry_definition()
+    bundle = registry.get("bundles", {}).get(bundle_name, {})
+    names = bundle.get("modules")
     if not names:
         raise SystemExit(f"Unknown bundle: {bundle_name}")
     missing = [name for name in names if name not in modules]
@@ -142,8 +137,10 @@ def resolve_bundle(bundle_name: str, modules: dict[str, Module]) -> list[Module]
 def expand_targets(target: str | None, modules: dict[str, Module], include_all: bool = False) -> list[str]:
     if target is None:
         return list(modules.keys()) if include_all else []
-    if target in BUNDLES:
-        return list(BUNDLES[target])
+    registry = load_registry_definition()
+    bundles = registry.get("bundles", {})
+    if target in bundles:
+        return list(bundles[target].get("modules", []))
     return [target]
 
 
@@ -193,9 +190,50 @@ def update_env_file(path: Path, values: dict[str, str]) -> None:
 
 
 def cmd_list(_: argparse.Namespace) -> int:
+    registry = load_registry_definition()
+    installed = load_json(REGISTRY_PATH, {})
     modules = discover_modules()
     for module in modules.values():
-        print(f"{module.name}\t{module.version}\t{module.kind}\t{module.plane}\t{module.path}")
+        metadata = registry.get("modules", {}).get(module.name, {})
+        blessed = "yes" if metadata.get("blessed") else "no"
+        installed_marker = "installed" if module.name in installed else "available"
+        print(
+            f"{module.name}\t{module.version}\t{module.kind}\t{module.plane}\t{blessed}\t{installed_marker}\t{module.path}"
+        )
+    return 0
+
+
+def resolve_install_target(target: str, modules: dict[str, Module]) -> Module:
+    if target in modules:
+        return modules[target]
+    candidate = Path(target)
+    if candidate.exists():
+        manifest_path = candidate / "spark.toml"
+        if not manifest_path.exists():
+            raise SystemExit(f"{candidate} does not contain spark.toml")
+        return load_module(candidate)
+    raise SystemExit(f"Unknown module target: {target}")
+
+
+def install_module_record(module: Module) -> None:
+    installed = load_json(REGISTRY_PATH, {})
+    installed[module.name] = {
+        "path": str(module.path),
+        "version": module.version,
+        "kind": module.kind,
+        "plane": module.plane,
+    }
+    save_json(REGISTRY_PATH, installed)
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    ensure_state_dirs()
+    modules = discover_modules()
+    module = resolve_install_target(args.target, modules)
+    install_module_record(module)
+    print(f"Installed {module.name} from {module.path}")
+    if "telegram.ingress" in module.capabilities:
+        print("This module declares telegram.ingress and should be the only live Telegram token owner.")
     return 0
 
 
@@ -419,8 +457,12 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser = subparsers.add_parser("list", help="List local Spark modules with manifests")
     list_parser.set_defaults(func=cmd_list)
 
+    install_parser = subparsers.add_parser("install", help="Install a module by registry name or local repo path")
+    install_parser.add_argument("target")
+    install_parser.set_defaults(func=cmd_install)
+
     setup_parser = subparsers.add_parser("setup", help="Configure a starter bundle")
-    setup_parser.add_argument("bundle", choices=sorted(BUNDLES.keys()))
+    setup_parser.add_argument("bundle", choices=sorted(load_registry_definition().get("bundles", {}).keys()))
     setup_parser.add_argument("--bot-token")
     setup_parser.add_argument("--admin-telegram-ids")
     setup_parser.add_argument("--telegram-gateway-mode", choices=["auto", "polling", "webhook"], default="auto")

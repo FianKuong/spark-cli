@@ -5,7 +5,14 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from spark_cli.cli import Module, detect_ingress_owner, expand_targets, summarize_command_output, update_env_file
+from spark_cli.cli import (
+    Module,
+    detect_ingress_owner,
+    expand_targets,
+    resolve_install_target,
+    summarize_command_output,
+    update_env_file,
+)
 
 
 def make_module(name: str, capabilities: list[str]) -> Module:
@@ -68,6 +75,22 @@ class SparkCliTests(unittest.TestCase):
             self.assertIn("BOT_TOKEN=abc", contents)
             self.assertIn("ADMIN_TELEGRAM_IDS=123", contents)
             self.assertNotIn("OLD=1", contents)
+
+    def test_resolve_install_target_prefers_registry_module_name(self) -> None:
+        gateway = make_module("spark-telegram-bot", ["telegram.ingress"])
+        resolved = resolve_install_target("spark-telegram-bot", {"spark-telegram-bot": gateway})
+        self.assertEqual(resolved.name, "spark-telegram-bot")
+
+    def test_resolve_install_target_accepts_local_repo_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            repo_path = Path(tmp_dir) / "module"
+            repo_path.mkdir()
+            (repo_path / "spark.toml").write_text(
+                '[module]\nname = "test-module"\nversion = "0.1.0"\nkind = "service"\nplane = "execution"\n',
+                encoding="utf-8",
+            )
+            resolved = resolve_install_target(str(repo_path), {})
+            self.assertEqual(resolved.name, "test-module")
 
 
 if __name__ == "__main__":
