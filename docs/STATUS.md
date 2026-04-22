@@ -2,9 +2,9 @@
 
 **Last updated:** 2026-04-22 (end of day)
 **Scope:** the `spark-cli` spike at `C:\Users\USER\Desktop\spark-cli`
-**Source of truth:** `src/spark_cli/cli.py` (1826 LOC) + `tests/test_cli.py` (922 LOC)
-**Test state:** 56/56 passing on this machine
-**Branch:** `master` at commit `f779d47`
+**Source of truth:** `src/spark_cli/cli.py` (2397 LOC) + `tests/test_cli.py` (1250 LOC)
+**Test state:** 83/83 passing on this machine
+**Branch:** `master` at commit `99a2e04`
 
 This document is the ground-truth index of what the spike does, what it does
 not, and where to look. Update it at the end of any session that changes the
@@ -14,146 +14,170 @@ surface area of the CLI.
 
 ## TL;DR
 
-The spike covers the **full install → setup → start → status → stop →
-uninstall lifecycle** for modules declared in a local `registry.json`,
-with git-based fetch, keychain-backed secrets, an interactive setup
-wizard, dependency-aware start/stop ordering, repair hints, and a
-capability resolver.
+The spike ships the **full install lifecycle** for both registry-backed and
+git-sourced modules, plus a **module scaffolder** (`spark init`), **user
+config**, **registry search**, **OS-keychain secrets**, **interactive setup
+wizard**, **dependency-aware start/stop**, **trust prompt for non-blessed
+installs**, **`--resume`** on failed installs, **runtime version enforcement**,
+and a **schema-version guard**. Fourteen top-level commands total.
 
-What it still does **not** do: runtime version enforcement, manifest
-schema versioning, license/Pro gating, `spark login`, a dashboard or
-web installer, module scaffolding (`spark init`), and `--resume` on
-failed installs. None of those are blockers for "a fresh user gets to
-`spark setup telegram-starter` working end-to-end."
+What it still does **not** do: a dashboard, license/Pro gating via
+`spark login`, and a web installer. All three are explicit large-scope
+items deferred pending architectural decisions about backend URLs,
+signing keys, and hosted infra.
+
+---
+
+## CLI surface (14 commands)
+
+```
+spark list                            # discovered modules
+spark init <name> [--kind] [--path]   # scaffold a new module
+spark install <target> [--resume]     # registry name | bundle | path | git url
+spark update [target]                 # re-run install commands; git pull for managed clones
+spark uninstall [target] [--force]    # tear down + rotate secrets
+spark setup <bundle> [--non-interactive]   # interactive preflight + prompts
+spark start [target]                  # topological launch with ready-check
+spark stop  [target]                  # reverse-topological kill
+spark status [--json]                 # healthchecks + repair hints
+spark doctor [--json]                 # diagnostic variant of status
+spark logs <module> [-n N] [-f]       # tail process logs
+spark search [query]                  # registry browse + installed badge
+spark secrets list|set|get|delete     # keychain-backed secret store
+spark config get|set|unset|list       # user-level config at ~/.spark/config/config.json
+```
+
+Global install-time flags on `install` and `setup`:
+- `--skip-install-commands` — skip `[install.dev].commands`
+- `--skip-runtime-check` — skip `[runtime].version` enforcement
+- `--trust` — approve non-blessed install without prompt
+- `--resume` — skip steps recorded complete on a prior attempt
+- `--non-interactive` (`setup` only) — require secrets via flags, skip preflight prompts
 
 ---
 
 ## Shipped feature matrix
 
-Tracked across 15 commits on `master`. Every entry is covered by tests
+Tracked across 17 commits on `master`. Every entry is covered by tests
 unless noted.
 
 ### Install lifecycle
 
 | Feature | Code | Test |
 |---|---|---|
-| Manifest parsing into a `Module` dataclass | `cli.py:30-123` | via fixtures |
-| Local `registry.json` with modules + bundles | `cli.py:126-218` | `test_resolve_bundle_names_reads_registry_bundle` |
+| Manifest parsing into a `Module` dataclass | `cli.py` | via fixtures |
+| Local `registry.json` with modules + bundles | `load_registry_definition` | `test_resolve_bundle_names_reads_registry_bundle` |
 | `list` | `cmd_list` | — |
-| `install <module>` (registry name or local path) | `cmd_install` | `test_resolve_install_target_*` |
-| `install <bundle>` with ingress-owner enforcement | `cmd_install` | `test_detect_ingress_owner_*` |
-| `install <git-url>` / `install <registry-name>` with git source | `clone_module_source`, `resolve_install_target` | `test_clone_module_source_clones_and_pull_updates_from_local_bare_repo` |
-| Capability conflict guard (multiple `telegram.ingress` owners) | `detect_capability_conflicts` | `test_detect_capability_conflicts_*` |
-| Capability needs resolver (`needs.capabilities`) | `validate_capability_needs_for_install` | `test_validate_capability_needs_*` |
-| `[install.dev].commands` execution with failure surfacing | `execute_install_commands` | `test_execute_install_commands_*` |
-| `post_install` / `pre_uninstall` / `post_uninstall` hooks | `run_module_hook` | — |
-| Install provenance (`installed_via`, `bundle_provenance`, `last_install`, `last_update`) | `install_module_record` | `test_install_module_record_writes_provenance_metadata` |
+| `install <module>` (registry name, path, git URL) | `cmd_install`, `resolve_install_target` | `test_resolve_install_target_*` |
+| `install <bundle>` with ingress-owner enforcement | `cmd_install`, `detect_ingress_owner` | `test_detect_ingress_owner_*` |
+| Capability conflict guard | `detect_capability_conflicts` | `test_detect_capability_conflicts_*` |
+| `needs.capabilities` resolver | `validate_capability_needs_for_install` | `test_validate_capability_needs_*` |
+| `[install.dev].commands` execution | `execute_install_commands` | `test_execute_install_commands_*` |
+| Install provenance in `installed.json` | `install_module_record` | `test_install_module_record_writes_provenance_metadata` |
+| Trust prompt for non-blessed modules | `ensure_trust_for_install`, `describe_install_risk`, `is_blessed_registry_entry` | `test_ensure_trust_for_install_*`, `test_describe_install_risk_*` |
+| `--resume` with per-target progress file | `run_install_commands_with_progress`, `record_install_step`, `clear_install_progress` | `test_install_progress_*`, `test_run_install_commands_with_progress_*` |
+| Runtime version constraint enforcement | `enforce_runtime_versions`, `check_runtime_version_for_module`, `runtime_version_satisfies` | `test_check_runtime_version_*`, `test_runtime_version_satisfies_*` |
+| Manifest schema version guard (`schema = 1`) | `validate_manifest_schema`, `manifest_schema_version` | `test_validate_manifest_schema_*` |
 
-### Setup
+### Setup wizard
 
 | Feature | Code | Test |
 |---|---|---|
 | Bundle resolution + single-ingress enforcement | `resolve_bundle`, `detect_ingress_owner` | — |
-| Manifest-driven secret collection | `collect_secret_requirements`, `collect_secret_values` | `test_collect_secret_*` |
-| Interactive setup wizard (TTY prompts via `getpass`) | `run_setup_wizard` | `test_run_setup_wizard_*` |
-| Preflight runtime detection (`claude`, `uv`, `bun`, `node`, `python`) | `detect_runtime_binary`, `print_setup_preflight` | `test_detect_runtime_binary_*`, `test_required_runtimes_for_modules_*` |
+| Interactive TTY prompts via `getpass` | `run_setup_wizard`, `prompt_for_secret` | `test_run_setup_wizard_*` |
+| Preflight: Claude Code + runtime binaries + per-module constraints | `print_setup_preflight`, `detect_claude_code`, `detect_runtime_binary` | `test_detect_runtime_binary_*` |
 | `--non-interactive` mode | `setup_is_interactive` | `test_setup_is_interactive_*` |
-| `--secret key=value` plus legacy `--bot-token` etc. | `parse_secret_pairs`, `collect_secret_values` | `test_collect_secret_values_*` |
-| Generated module env files in `~/.spark/config/modules/` | `write_generated_env` | — |
-| Idempotent `# --- spark-cli managed start/end ---` block in module `.env` | `update_env_file`, `remove_managed_env_block` | `test_update_env_file_*`, `test_remove_managed_env_block_*` |
-| Ingress-only telegram secret routing | `build_module_envs` | `test_build_module_envs_routes_telegram_secret_only_to_gateway` |
+| Manifest-driven secret collection with dedup | `collect_secret_requirements`, `collect_secret_values` | `test_collect_secret_*` |
+| Generated module env files | `write_generated_env`, `update_env_file` | `test_update_env_file_*` |
 
 ### Secrets
 
 | Feature | Code | Test |
 |---|---|---|
-| OS keychain backend via `python-keyring` with probe | `keychain_available`, `store_secret`, `fetch_secret`, `delete_secret` | `test_store_and_fetch_secret_roundtrip_via_file_backend` |
+| OS keychain via `python-keyring` (Windows Credential Manager probed green) | `keychain_available`, `store_secret`, `fetch_secret`, `delete_secret` | `test_store_and_fetch_secret_*` |
 | File fallback at `~/.spark/config/secrets.local.json` (mode 0o600) | same | same |
-| Manifest `storage = "keychain"` routes to keychain at setup time | `persist_keychain_secrets`, `split_secret_bindings` | `test_persist_keychain_secrets_*` |
-| Keychain env vars stripped from plaintext env files | `strip_keychain_env_vars` | `test_strip_keychain_env_vars_*` |
-| Keychain secrets injected into subprocess env at start time | `keychain_env_for_module`, `start_module` | `test_keychain_env_for_module_*` |
-| `spark secrets list / set / get / delete` (masking, `--reveal`) | `cmd_secrets_*` | — (smoke-tested end-to-end against real Credential Manager) |
-
-### Status and doctor
-
-| Feature | Code | Test |
-|---|---|---|
-| `status` + `status --json` with per-module healthcheck | `collect_status_payload`, `cmd_status` | `test_build_module_repair_hints_*` |
-| `doctor` + `doctor --json` | `cmd_doctor` | — |
-| Dep-aware repair hints (missing deps, unhealthy deps, missing ingress owner, stale bundle) | `build_module_repair_hints`, `build_status_repair_hints` | `test_build_status_repair_hints_*` |
-| Healthcheck `failure_hint` / `success_hint` surfacing | `evaluate_module_health` | — |
-| npm `> cmd` prefix stripping in healthcheck output | `summarize_command_output` | `test_summarize_command_output_*` |
-
-### Update and uninstall
-
-| Feature | Code | Test |
-|---|---|---|
-| `update [target]` re-runs install commands and `post_install` hook | `cmd_update` | — |
-| `git pull --ff-only` for git-managed modules | `pull_module_source`, `module_is_git_managed` | `test_clone_module_source_*` (covers pull) |
-| Env resync into module `.env` | `sync_generated_env_to_module` | — |
-| `uninstall [target]` with dep protection and `--force` | `cmd_uninstall`, `detect_uninstall_blockers` | `test_detect_uninstall_blockers_*` |
-| Clone dir teardown on uninstall | `remove_module_clone` | — |
-| Setup-state repair after uninstall | `update_setup_state_after_uninstall` | `test_update_setup_state_after_uninstall_*` |
+| Manifest `storage = "keychain"` routes into keychain at setup | `persist_keychain_secrets`, `split_secret_bindings` | `test_persist_keychain_secrets_*` |
+| Keychain env vars stripped from plaintext envs | `strip_keychain_env_vars` | `test_strip_keychain_env_vars_*` |
+| Keychain injected into subprocess env at start | `keychain_env_for_module`, `start_module` | `test_keychain_env_for_module_*` |
+| `spark secrets list|set|get|delete` | `cmd_secrets_*` | — (smoke-tested against real Credential Manager) |
 
 ### Start / stop / logs
 
 | Feature | Code | Test |
 |---|---|---|
-| `start [target]` in topological order from `needs.modules` | `resolve_start_modules`, `topologically_sort_modules` | `test_resolve_start_modules_*` |
-| Pid tracking in `~/.spark/state/pids.json` | `load_pids`, `save_pids` | — |
-| Stale pid detection; re-launch when dead | `pid_is_running`, `start_module` | `test_pid_is_running_*` |
+| `start [target]` topological from `needs.modules` | `resolve_start_modules`, `topologically_sort_modules` | `test_resolve_start_modules_*` |
+| Stale-pid detection + re-launch | `pid_is_running`, `start_module` | `test_pid_is_running_*` |
 | Ready-check polling (HTTP + shell) | `wait_for_ready_check` | `test_wait_for_ready_check_*` |
-| `stop [target]` in reverse-topological order | `resolve_stop_module_names` | `test_resolve_stop_module_names_*` |
-| Windows-safe process groups (`DETACHED_PROCESS`, `taskkill /T /F`) | `start_module`, `stop_module` | — |
-| `logs <module> [-n N] [-f]` with tail + follow | `cmd_logs`, `tail_log_lines`, `follow_log_file` | `test_tail_log_lines_*`, `test_module_log_path_*` |
+| `stop [target]` reverse-topological | `resolve_stop_module_names` | `test_resolve_stop_module_names_*` |
+| Windows-safe process groups | `start_module`, `stop_module` | — |
+| `logs <module> [-n N] [-f]` | `cmd_logs`, `tail_log_lines`, `follow_log_file` | `test_tail_log_lines_*` |
+
+### Status / doctor
+
+| Feature | Code | Test |
+|---|---|---|
+| `status` + `--json` | `collect_status_payload`, `cmd_status` | `test_build_module_repair_hints_*` |
+| `doctor` + `--json` | `cmd_doctor` | — |
+| Dep-aware repair hints | `build_module_repair_hints`, `build_status_repair_hints` | `test_build_status_repair_hints_*` |
+| Healthcheck `failure_hint` / `success_hint` | `evaluate_module_health` | — |
 
 ### Git fetch
 
 | Feature | Code | Test |
 |---|---|---|
-| URL shape detection (`https://`, `git@`, `github.com/...`, `.git`) | `is_git_source` | `test_is_git_source_*` |
-| URL normalization (github shorthand → https) | `normalize_git_url` | `test_normalize_git_url_*` |
-| Name inference from URL | `infer_module_name_from_url` | `test_infer_module_name_from_url_*` |
-| Clone into `~/.spark/modules/<name>/source/` | `clone_module_source` | integration test with local bare repo |
-| Prefer cloned copy over registry path during discovery | `discover_modules` | — |
-| Detect spark-managed module paths | `module_is_git_managed` | `test_module_is_git_managed_*` |
+| URL shape detection + shorthand normalization | `is_git_source`, `normalize_git_url`, `infer_module_name_from_url` | `test_is_git_source_*`, `test_normalize_git_url_*` |
+| `git clone --depth=1` into `~/.spark/modules/<name>/source/` | `clone_module_source` | integration test with local bare repo |
+| `git pull --ff-only` in `update` | `pull_module_source` | covered in clone test |
+| Spark-managed path detection | `module_is_git_managed` | `test_module_is_git_managed_*` |
+
+### Update / uninstall
+
+| Feature | Code | Test |
+|---|---|---|
+| `update [target]` re-runs install commands + `post_install` hook | `cmd_update` | — |
+| `git pull --ff-only` for managed clones | `pull_module_source` | covered by clone integration test |
+| Env resync into module `.env` | `sync_generated_env_to_module` | — |
+| `uninstall` with dep protection + `--force` | `cmd_uninstall`, `detect_uninstall_blockers` | `test_detect_uninstall_blockers_*` |
+| Clone-dir teardown on uninstall | `remove_module_clone` | — |
+| Setup-state repair after uninstall | `update_setup_state_after_uninstall` | `test_update_setup_state_after_uninstall_*` |
+
+### Scaffolder and discovery
+
+| Feature | Code | Test |
+|---|---|---|
+| `spark init <name> [--kind python|node]` | `cmd_init`, `scaffold_module_files`, `render_init_spark_toml`, `validate_init_module_name` | `test_validate_init_module_name_*`, `test_render_init_spark_toml_*`, `test_scaffold_module_files_*` |
+| `spark search [query]` with blessed/installed badges | `cmd_search` | — |
+| `spark config get|set|unset|list` with dotted keys + JSON coercion | `cmd_config_*`, `dotted_get`, `dotted_set`, `dotted_unset`, `coerce_config_value` | `test_dotted_*`, `test_coerce_config_value_*` |
 
 ---
 
 ## Not yet implemented
 
-Rough order of value-per-lift. None are blockers for the
-`spark setup telegram-starter` first-run story.
+All remaining items are large-scope and need product / architecture
+decisions before coding. Deliberately deferred.
 
-### Small lift
+- **`spark dashboard`** — SvelteKit foreground app shelling out to
+  `spark <cmd> --json`. Needs: subproject layout, port allocation,
+  which commands to surface first. One full session minimum.
+- **`spark login` + Pro gating** — JWT, signing key, offline grace,
+  sub-check endpoint, billing webhook. Needs: hosted license server
+  URL, keypair, subscription model. Blocks every Pro-tier module.
+- **Web installer at `sparkswarm.ai/install`** — landing page +
+  one-shot install script. Needs: domain, landing copy, the install
+  script itself (Homebrew tap? curl-to-bash script?).
+- **Telemetry opt-in** — intentionally skipped for now per direction.
 
-- **`spark config get/set`** — user-level config at `~/.spark/config.toml`.
-- **Manifest schema version** (`schema = 1`) — one-field forward-compat hook.
-- **Runtime version range** from `[runtime].version` (`>=3.11`, `>=22`) — semver check before `[install.dev]` runs.
-
-### Medium lift
-
-- **Trust prompt for non-blessed git URLs** — print the manifest's `[hooks]` block and require confirmation before running.
-- **`--resume` on failed installs** — each install step is already idempotent; needs a resume cursor in `installed.json`.
-- **Telemetry opt-in prompt** during `spark setup`.
-- **`spark search`** over the blessed registry.
-
-### Larger scope
-
-- **`spark init <name>`** — module scaffolder.
-- **`spark dashboard`** — SvelteKit foreground app shelling out to `spark <cmd> --json`.
-- **`spark login` + license/Pro gating** — JWT, offline grace, sub-check at install/start.
-- **Web installer at `sparkswarm.ai/install`** — same dashboard in onboarding mode.
-- **Full `needs.capabilities` wizard path** — today the resolver reports unmet needs; an interactive flow would offer to install a suggested provider in place.
+See [design/spark-installer-design-v1.md](./design/spark-installer-design-v1.md)
+for the intended shape of each.
 
 ---
 
 ## Unsure — verify before acting
 
-1. **`spawner-ui` `npm run health:spark`** — declared in its manifest; has never been confirmed to exist in its `package.json`. If the script is missing, `spark status` will always show red for spawner-ui.
-2. **`python -m spark_intelligence.cli doctor`** — the builder's declared healthcheck. Run it once to confirm the entry point still exists.
-3. **PATH collision** — if another tool named `spark` is already on PATH, `pip install -e .` will not overwrite it. `spark-local` is the safe alias.
-4. **Existing `~/.spark/state/installed.json`** — was written under the older provenance schema. Any `install` will upgrade the record in place; not broken, just means current on-disk shape predates commit `bb850aa`.
+1. ~~`spawner-ui`'s `npm run health:spark` — declared in its manifest~~ → **verified 2026-04-22**: `spawner-ui/package.json:9` → `node scripts/health-spark.mjs`.
+2. ~~`python -m spark_intelligence.cli doctor` — builder healthcheck~~ → **verified 2026-04-22**: runs end-to-end, reports `degraded` due to known `watchtower-freshness` gap (per user memory); all other subchecks green.
+3. **PATH collision** — if another `spark` is on PATH, `pip install -e .` will not overwrite it. `spark-local` is the safe alias.
+4. **Legacy `~/.spark/state/installed.json`** — written under an older provenance schema before commit `bb850aa`. Any `install` upgrades the record in place; not broken, just pre-dated.
 
 ---
 
@@ -161,8 +185,8 @@ Rough order of value-per-lift. None are blockers for the
 
 ```
 spark-cli/
-├── pyproject.toml                 # name=spark-cli, deps=[keyring>=24.0], scripts=spark + spark-local
-├── registry.json                  # modules and bundles (local paths today)
+├── pyproject.toml                 # deps=[keyring>=24.0], scripts=spark + spark-local
+├── registry.json                  # modules and bundles
 ├── README.md                      # command reference
 ├── docs/
 │   ├── STATUS.md                  # this file
@@ -172,21 +196,23 @@ spark-cli/
 │       └── user-flows-and-diagrams.md
 ├── src/spark_cli/
 │   ├── __init__.py
-│   └── cli.py                     # everything: primitives + commands + argparse
+│   └── cli.py                     # 2397 LOC; everything in one module
 └── tests/
-    └── test_cli.py                # 56 tests; unittest + mock
+    └── test_cli.py                # 1250 LOC, 83 tests, unittest + mock
 ```
 
-`~/.spark/` layout created and managed by the CLI:
+`~/.spark/` tree managed by the CLI:
 
 ```
 ~/.spark/
 ├── state/
 │   ├── installed.json             # installed modules + provenance
 │   ├── setup.json                 # configured bundle + ingress owner
-│   └── pids.json                  # running process pids
+│   ├── pids.json                  # running process pids
+│   └── install_progress.json      # checkpoint for --resume
 ├── config/
-│   ├── modules/<name>.env         # generated module env files (non-secret)
+│   ├── config.json                # user-level config via `spark config`
+│   ├── modules/<name>.env         # generated per-module env files (non-secret)
 │   ├── secrets_index.json         # which backend holds each secret
 │   └── secrets.local.json         # only when keychain is unavailable
 ├── modules/<name>/source/         # clone target for git-sourced modules
@@ -198,26 +224,29 @@ spark-cli/
 ## Quick operator reference
 
 ```bash
-# First-time setup
-python -m spark_cli.cli setup telegram-starter       # interactive preflight + prompts
-python -m spark_cli.cli setup telegram-starter --non-interactive --secret telegram.bot_token=... --secret telegram.admin_ids=...
+# Fresh onboarding
+python -m spark_cli.cli setup telegram-starter     # interactive preflight + prompts
+python -m spark_cli.cli setup telegram-starter --non-interactive \
+    --secret telegram.bot_token=... --secret telegram.admin_ids=...
 
-# Lifecycle
-python -m spark_cli.cli list
-python -m spark_cli.cli install <module|bundle|path|git-url>
+# Registry + scaffolder
+python -m spark_cli.cli search [query]
+python -m spark_cli.cli init my-module --kind python
+
+# Install lifecycle
+python -m spark_cli.cli install <name|bundle|path|git-url> [--resume]
 python -m spark_cli.cli update [target]
 python -m spark_cli.cli uninstall [target] [--force]
 
-# Operation
+# Run
 python -m spark_cli.cli start [target]
 python -m spark_cli.cli stop  [target]
 python -m spark_cli.cli status [--json]
 python -m spark_cli.cli doctor [--json]
 python -m spark_cli.cli logs <module> [-n 200] [-f]
 
-# Secrets
+# Config + secrets
+python -m spark_cli.cli config set dashboard.port 8765
 python -m spark_cli.cli secrets list
-python -m spark_cli.cli secrets set <secret_id> [--value ...] [--backend keychain|file]
-python -m spark_cli.cli secrets get <secret_id> [--reveal]
-python -m spark_cli.cli secrets delete <secret_id>
+python -m spark_cli.cli secrets set telegram.bot_token
 ```
