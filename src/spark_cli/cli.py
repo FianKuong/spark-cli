@@ -737,6 +737,26 @@ def write_generated_env(path: Path, values: dict[str, str]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def read_generated_env(path: Path) -> dict[str, str]:
+    values: dict[str, str] = {}
+    if not path.exists():
+        return values
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        values[key.strip()] = value
+    return values
+
+
+def module_runtime_env(module: Module) -> dict[str, str]:
+    env = shell_command_env()
+    env.update(read_generated_env(generated_module_env_path(module)))
+    env.update(keychain_env_for_module(module))
+    return env
+
+
 LLM_PROVIDER_ENV: dict[str, dict[str, str]] = {
     "zai": {
         "api_key_secret": "llm.zai.api_key",
@@ -1324,7 +1344,7 @@ def run_module_hook(module: Module, hook_name: str) -> None:
     command = module.hook_command(hook_name)
     if not command:
         return
-    result = run_shell(command, module.path)
+    result = run_shell(command, module.path, env=module_runtime_env(module))
     if result.returncode != 0:
         raise SystemExit(
             f"{module.name} hook `{hook_name}` failed: {summarize_command_output(result)}"
@@ -1391,7 +1411,7 @@ def evaluate_module_health(module: Module) -> dict[str, Any]:
             "healthcheck_command": None,
             "failure_hint": None,
         }
-    result = run_shell(command, module.path)
+    result = run_shell(command, module.path, env=module_runtime_env(module))
     detail = summarize_command_output(result)
     failure_hint = str(module.manifest.get("healthcheck", {}).get("failure_hint", "")).strip() or None
     success_hint = str(module.manifest.get("healthcheck", {}).get("success_hint", "")).strip() or None
@@ -1722,14 +1742,14 @@ def persist_keychain_secrets(bundle: list[Module], secret_values: dict[str, str]
     return report
 
 
-def run_shell(command: str, cwd: Path) -> subprocess.CompletedProcess[str]:
+def run_shell(command: str, cwd: Path, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         cwd=str(cwd),
         shell=True,
         capture_output=True,
         text=True,
-        env=shell_command_env(),
+        env=env or shell_command_env(),
     )
 
 
@@ -2015,7 +2035,7 @@ def wait_for_ready_check(module: Module) -> tuple[bool, str]:
             except (urllib.error.URLError, TimeoutError) as error:
                 last_error = str(error)
         else:
-            result = run_shell(ready_check, module.path)
+            result = run_shell(ready_check, module.path, env=module_runtime_env(module))
             if result.returncode == 0:
                 return True, summarize_command_output(result)
             last_error = summarize_command_output(result)
@@ -2047,10 +2067,7 @@ def start_module(module: Module) -> bool:
     if os.name == "nt":
         creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS
 
-    subprocess_env = os.environ.copy()
-    keychain_env = keychain_env_for_module(module)
-    if keychain_env:
-        subprocess_env.update(keychain_env)
+    subprocess_env = module_runtime_env(module)
 
     process = subprocess.Popen(
         command,

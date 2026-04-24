@@ -87,6 +87,7 @@ from spark_cli.cli import (
     pid_is_running,
     print_install_summary,
     ready_timeout_seconds,
+    read_generated_env,
     required_runtimes_for_modules,
     resolve_runtime_binary,
     run_setup_wizard,
@@ -1170,6 +1171,12 @@ class SparkCliTests(unittest.TestCase):
             else:
                 self.assertIn(sys.executable, python_shim.read_text(encoding="utf-8"))
                 self.assertTrue((shim_dir / "pip.cmd").exists())
+
+    def test_read_generated_env_ignores_comments_and_blank_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            env_path = Path(tmp_dir) / "module.env"
+            env_path.write_text("# comment\n\nA=1\nB=two=three\n", encoding="utf-8")
+            self.assertEqual(read_generated_env(env_path), {"A": "1", "B": "two=three"})
 
     def test_command_with_managed_python_rewrites_pip_installers(self) -> None:
         rewritten = command_with_managed_python("python -m pip install -e .")
