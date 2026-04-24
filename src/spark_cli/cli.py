@@ -779,7 +779,7 @@ LLM_PROVIDER_ENV: dict[str, dict[str, str]] = {
         "model_arg": "ollama_model",
         "model_env": "OLLAMA_MODEL",
         "model_default": "kimi-k2.5:cloud",
-        "bot_provider": "codex",
+        "bot_provider": "ollama",
     },
 }
 

@@ -997,6 +997,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("TELEGRAM_RELAY_SECRET", envs["spark-telegram-bot"])
         self.assertEqual(envs["spark-telegram-bot"]["TELEGRAM_RELAY_SECRET"], envs["spawner-ui"]["TELEGRAM_RELAY_SECRET"])
         self.assertEqual(envs["spark-telegram-bot"]["LLM_PROVIDER"], "ollama")
+        self.assertEqual(envs["spark-telegram-bot"]["BOT_DEFAULT_PROVIDER"], "ollama")
         self.assertEqual(envs["spark-telegram-bot"]["OLLAMA_URL"], "http://localhost:11434")
         self.assertEqual(envs["spark-intelligence-builder"]["SPARK_LLM_PROVIDER"], "ollama")
 
