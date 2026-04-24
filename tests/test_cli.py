@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import json
 import shutil
 import subprocess
 import tempfile
@@ -596,6 +597,27 @@ class SparkCliTests(unittest.TestCase):
     def test_setup_defaults_to_telegram_starter_bundle(self) -> None:
         args = build_parser().parse_args(["setup", "--non-interactive"])
         self.assertEqual(args.bundle, "telegram-starter")
+
+    def test_guide_prints_normie_onboarding_surface(self) -> None:
+        args = build_parser().parse_args(["guide"])
+        with patch("sys.stdout", new_callable=StringIO) as stdout:
+            self.assertEqual(args.func(args), 0)
+        output = stdout.getvalue()
+        self.assertIn("@BotFather", output)
+        self.assertIn("spark setup --llm-provider zai", output)
+        self.assertIn("spark start spark-telegram-bot", output)
+        self.assertIn("/diagnose", output)
+        self.assertIn("/run <goal>", output)
+        self.assertIn("spark secrets list", output)
+
+    def test_guide_json_is_agent_readable(self) -> None:
+        args = build_parser().parse_args(["guide", "--json"])
+        with patch("sys.stdout", new_callable=StringIO) as stdout:
+            self.assertEqual(args.func(args), 0)
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(payload["title"], "Spark starter guide")
+        self.assertIn("starter_bundle", payload)
+        self.assertIn("telegram_commands", payload)
 
     def test_setup_default_bundle_registers_five_module_starter_stack(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

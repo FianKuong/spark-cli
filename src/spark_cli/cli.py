@@ -1630,6 +1630,7 @@ def print_setup_next_steps(bundle_name: str, ingress_owner: Module, llm_state: d
     print("Need a bot token? Open @BotFather in Telegram, run /newbot, then rerun:")
     print(f"     spark setup {bundle_name}")
     print("Need to change LLMs? Rerun setup with --llm-provider openai|anthropic|zai|ollama.")
+    print("Run `spark guide` anytime for BotFather, LLM, module, and Telegram command help.")
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
@@ -2524,6 +2525,121 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
     return 0
 
 
+def onboarding_guide_payload() -> dict[str, Any]:
+    return {
+        "title": "Spark starter guide",
+        "goal": "Install once, configure one Telegram bot and one LLM provider, then talk to Spark from Telegram.",
+        "starter_bundle": [
+            {
+                "module": "spark-telegram-bot",
+                "role": "Telegram front door. Owns the bot token, runs long polling, and receives your chat commands.",
+            },
+            {
+                "module": "spark-intelligence-builder",
+                "role": "Runtime brain. Handles identity, memory bridge, provider routing, and domain-chip activation.",
+            },
+            {
+                "module": "domain-chip-memory",
+                "role": "Default memory chip. Provides memory contracts, benchmark checks, and memory-oriented skills.",
+            },
+            {
+                "module": "spark-researcher",
+                "role": "Research and advisory runtime. Helps with research, evidence packets, and domain-chip authoring.",
+            },
+            {
+                "module": "spawner-ui",
+                "role": "Local mission control. Creates and tracks missions, projects, and execution workflows.",
+            },
+        ],
+        "setup": {
+            "interactive": "spark setup",
+            "botfather": [
+                "Open Telegram and message @BotFather.",
+                "Send /newbot and follow BotFather's prompts.",
+                "Copy the token BotFather gives you.",
+                "Start your new bot, send /myid, and copy your numeric Telegram id.",
+                "Run spark setup again with the bot token and admin id if you did not provide them during install.",
+            ],
+            "llm_examples": [
+                "spark setup --llm-provider zai --zai-api-key <ZAI_API_KEY>",
+                "spark setup --llm-provider openai --openai-api-key <OPENAI_API_KEY> --openai-model gpt-5.5",
+                "spark setup --llm-provider anthropic --anthropic-api-key <ANTHROPIC_API_KEY>",
+                "spark setup --llm-provider ollama --ollama-url http://localhost:11434 --ollama-model kimi-k2.5:cloud",
+            ],
+        },
+        "start": [
+            "spark status",
+            "spark start spawner-ui",
+            "spark start spark-telegram-bot",
+        ],
+        "telegram_commands": [
+            { "command": "/start", "use": "Show the basic command surface." },
+            { "command": "/myid", "use": "Show your numeric Telegram id for admin setup." },
+            { "command": "/diagnose", "use": "Check Telegram, LLM, memory, Builder, and mission relay health." },
+            { "command": "/remember <note>", "use": "Save a memory through Spark's memory path when available." },
+            { "command": "/recall <query>", "use": "Search your Spark memory when available." },
+            { "command": "/run <goal>", "use": "Create a Spawner mission from Telegram." },
+            { "command": "/board", "use": "Show current mission board/status." },
+            { "command": "/mission status <id>", "use": "Inspect a mission." },
+            { "command": "normal message", "use": "Ask Spark to answer through the configured LLM provider." },
+        ],
+        "operator_commands": [
+            { "command": "spark status", "use": "Human-readable health check and repair hints." },
+            { "command": "spark doctor --json", "use": "Structured diagnostics for agents and support." },
+            { "command": "spark logs spark-telegram-bot", "use": "Read Telegram gateway logs." },
+            { "command": "spark logs spawner-ui", "use": "Read mission-control logs." },
+            { "command": "spark secrets list", "use": "Confirm configured secret ids without printing secret values." },
+            { "command": "spark setup", "use": "Rerun onboarding safely when changing bot, admin ids, or LLM provider." },
+        ],
+        "troubleshooting": [
+            "Bot receives no messages: make sure only one polling process is running, then restart spark-telegram-bot.",
+            "Bot says admin only: send /myid, add that numeric id during spark setup, then restart.",
+            "LLM does not answer: rerun spark setup with a provider/key, then run spark status.",
+            "/run fails: start spawner-ui and check spark logs spawner-ui.",
+            "Memory does not work: run spark status and repair Builder/domain-chip-memory hints first.",
+        ],
+    }
+
+
+def cmd_guide(args: argparse.Namespace) -> int:
+    payload = onboarding_guide_payload()
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+        return 0
+
+    print(payload["title"])
+    print(payload["goal"])
+    print("")
+    print("1. Set up Telegram")
+    for step in payload["setup"]["botfather"]:
+        print(f"   - {step}")
+    print("")
+    print("2. Pick one LLM provider")
+    for command in payload["setup"]["llm_examples"]:
+        print(f"   {command}")
+    print("")
+    print("3. Start Spark")
+    for command in payload["start"]:
+        print(f"   {command}")
+    print("")
+    print("4. Talk to Spark in Telegram")
+    for item in payload["telegram_commands"]:
+        print(f"   {item['command']}: {item['use']}")
+    print("")
+    print("5. How the modules work together")
+    for item in payload["starter_bundle"]:
+        print(f"   {item['module']}: {item['role']}")
+    print("")
+    print("Useful Spark CLI commands")
+    for item in payload["operator_commands"]:
+        print(f"   {item['command']}: {item['use']}")
+    print("")
+    print("If something feels stuck")
+    for item in payload["troubleshooting"]:
+        print(f"   - {item}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="spark", description="Spark installer and operator CLI spike")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -2600,6 +2716,10 @@ def build_parser() -> argparse.ArgumentParser:
     stop_parser = subparsers.add_parser("stop", help="Stop tracked Spark processes")
     stop_parser.add_argument("target", nargs="?")
     stop_parser.set_defaults(func=cmd_stop)
+
+    guide_parser = subparsers.add_parser("guide", help="Show first-run BotFather, LLM, module, and Telegram command guide")
+    guide_parser.add_argument("--json", action="store_true", help="Emit the guide as structured JSON")
+    guide_parser.set_defaults(func=cmd_guide)
 
     init_parser = subparsers.add_parser("init", help="Scaffold a new Spark module in a directory")
     init_parser.add_argument("name", help="Module name (lowercase + dashes)")
