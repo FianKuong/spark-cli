@@ -110,6 +110,8 @@ from spark_cli.cli import (
     summarize_command_output,
     update_setup_state_after_uninstall,
     update_env_file,
+    windows_startup_script_path,
+    write_windows_startup_script,
     write_runtime_shim,
 )
 
@@ -739,6 +741,48 @@ class SparkCliTests(unittest.TestCase):
             self.assertIn(["launchctl", "bootstrap", "gui/501", str(plist_path)], commands)
             self.assertIn(["launchctl", "kickstart", "-k", "gui/501/ai.sparkswarm.spark-telegram-agent"], commands)
 
+    def test_write_windows_startup_script_writes_user_login_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            startup_script = Path(tmp_dir) / "spark-telegram-agent.cmd"
+            with patch("spark_cli.cli.SPARK_HOME", Path("C:/Users/Example/.spark")):
+                write_windows_startup_script(startup_script, r'"C:\Users\Example\.spark\bin\spark.cmd" start telegram-starter')
+            content = startup_script.read_text(encoding="ascii")
+            self.assertIn('@echo off', content)
+            self.assertRegex(content, r'set "SPARK_HOME=C:[/\\]Users[/\\]Example[/\\]\.spark"')
+            self.assertIn(r'"C:\Users\Example\.spark\bin\spark.cmd" start telegram-starter', content)
+
+    def test_autostart_install_windows_falls_back_to_startup_folder_when_task_denied(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            startup_script = Path(tmp_dir) / "spark-telegram-agent.cmd"
+            commands: list[list[str]] = []
+
+            def fake_helper(command: list[str]) -> subprocess.CompletedProcess[str]:
+                commands.append(command)
+                if command[:2] == ["schtasks", "/Create"]:
+                    return subprocess.CompletedProcess(command, 1, "", "ERROR: Access is denied.")
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            args = build_parser().parse_args(["autostart", "install", "--now"])
+            with patch("spark_cli.cli.sys.platform", "win32"), \
+                 patch("spark_cli.cli.windows_startup_script_path", return_value=startup_script), \
+                 patch("spark_cli.cli.spark_invocation_args", return_value=[r"C:\Users\Example\.spark\bin\spark.cmd"]), \
+                 patch("spark_cli.cli.run_autostart_helper", side_effect=fake_helper), \
+                 patch("sys.stdout", new_callable=StringIO):
+                self.assertEqual(args.func(args), 0)
+
+            self.assertTrue(startup_script.exists())
+            self.assertEqual(commands[0][:7], ["schtasks", "/Create", "/SC", "ONLOGON", "/TN", "Spark Telegram Agent", "/TR"])
+            self.assertIn("start --allow-boot-warnings telegram-starter", commands[0][7])
+            self.assertEqual(commands[0][8], "/F")
+            self.assertIn([r"C:\Users\Example\.spark\bin\spark.cmd", "start", "--allow-boot-warnings", "telegram-starter"], commands)
+
+    def test_windows_startup_script_path_uses_appdata(self) -> None:
+        with patch.dict(os.environ, {"APPDATA": r"C:\Users\Example\AppData\Roaming"}):
+            path_text = str(windows_startup_script_path())
+            self.assertIn("Microsoft", path_text)
+            self.assertIn("Startup", path_text)
+            self.assertTrue(path_text.endswith("spark-telegram-agent.cmd"))
+
     def test_guide_prints_normie_onboarding_surface(self) -> None:
         args = build_parser().parse_args(["guide"])
         with patch("sys.stdout", new_callable=StringIO) as stdout:
@@ -1277,6 +1321,48 @@ class SparkCliTests(unittest.TestCase):
         self.assertFalse(ready)
         self.assertIn("http://127.0.0.1:5173/api/providers did not become ready within 1s", detail)
         self.assertIn("last error:", detail)
+
+    def test_wait_for_ready_check_accepts_running_process(self) -> None:
+        module = Module(
+            name="polling-target",
+            path=Path("C:/tmp/polling-target"),
+            manifest={
+                "module": {"name": "polling-target", "version": "0.1.0", "kind": "service", "plane": "ingress"},
+                "run": {"default": {"ready_check": "process"}},
+                "healthcheck": {"timeout_seconds": 2},
+            },
+        )
+
+        class RunningProcess:
+            def poll(self) -> None:
+                return None
+
+        with patch("spark_cli.cli.time.time", side_effect=[100.0, 100.1, 102.1]), \
+             patch("spark_cli.cli.time.sleep", return_value=None):
+            ready, detail = wait_for_ready_check(module, process=RunningProcess())  # type: ignore[arg-type]
+
+        self.assertTrue(ready)
+        self.assertEqual(detail, "process is running")
+
+    def test_wait_for_ready_check_rejects_exited_process(self) -> None:
+        module = Module(
+            name="polling-target",
+            path=Path("C:/tmp/polling-target"),
+            manifest={
+                "module": {"name": "polling-target", "version": "0.1.0", "kind": "service", "plane": "ingress"},
+                "run": {"default": {"ready_check": "process"}},
+                "healthcheck": {"timeout_seconds": 2},
+            },
+        )
+
+        class ExitedProcess:
+            def poll(self) -> int:
+                return 1
+
+        ready, detail = wait_for_ready_check(module, process=ExitedProcess())  # type: ignore[arg-type]
+
+        self.assertFalse(ready)
+        self.assertEqual(detail, "process exited with code 1")
 
     def test_format_start_warning_mentions_running_process_and_logs(self) -> None:
         module = Module(

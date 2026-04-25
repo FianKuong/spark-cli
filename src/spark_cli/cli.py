@@ -2130,12 +2130,23 @@ def ready_timeout_seconds(module: Module) -> int:
         return 10
 
 
-def wait_for_ready_check(module: Module) -> tuple[bool, str]:
+def wait_for_ready_check(module: Module, process: subprocess.Popen[Any] | None = None) -> tuple[bool, str]:
     ready_check = module.ready_check
     if not ready_check:
         return True, "no ready check declared"
 
     timeout_seconds = ready_timeout_seconds(module)
+    if ready_check == "process":
+        if process is None:
+            return False, "process ready check requires a spawned process"
+        stable_until = time.time() + min(2, timeout_seconds)
+        while time.time() < stable_until:
+            exit_code = process.poll()
+            if exit_code is not None:
+                return False, f"process exited with code {exit_code}"
+            time.sleep(0.2)
+        return True, "process is running"
+
     deadline = time.time() + timeout_seconds
     last_error = "ready check did not pass before timeout"
     while time.time() < deadline:
@@ -2214,7 +2225,7 @@ def start_module(module: Module, *, allow_boot_warnings: bool = False) -> bool:
     }
     save_pids(pids)
     print(f"Started {module.name} (pid {process.pid})")
-    ready, detail = wait_for_ready_check(module)
+    ready, detail = wait_for_ready_check(module, process=process)
     if ready:
         print(f"Ready {module.name}: {detail}")
     else:
@@ -2372,6 +2383,23 @@ def macos_autostart_path() -> Path:
     return Path.home() / "Library" / "LaunchAgents" / f"{AUTOSTART_LAUNCHD_LABEL}.plist"
 
 
+def windows_startup_script_path() -> Path:
+    appdata = os.environ.get("APPDATA")
+    base = Path(appdata) if appdata else Path.home() / "AppData" / "Roaming"
+    return base / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "Startup" / f"{AUTOSTART_SERVICE_NAME}.cmd"
+
+
+def write_windows_startup_script(path: Path, start_command: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f"@echo off\r\n"
+        f"set \"SPARK_HOME={SPARK_HOME}\"\r\n"
+        f"cd /d \"{SPARK_HOME}\"\r\n"
+        f"{start_command}\r\n",
+        encoding="ascii",
+    )
+
+
 def run_autostart_helper(command: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(command, check=False, capture_output=True, text=True)
 
@@ -2456,7 +2484,7 @@ def cmd_autostart_install(args: argparse.Namespace) -> int:
         return 1 if failures else 0
 
     if sys.platform == "win32":
-        task_command = subprocess.list2cmdline(spark_invocation_args() + ["start", target])
+        task_command = start_command
         command = [
             "schtasks",
             "/Create",
@@ -2471,12 +2499,24 @@ def cmd_autostart_install(args: argparse.Namespace) -> int:
         result = run_autostart_helper(command)
         if result.returncode != 0:
             print_helper_failure(command, result)
-            return 1
+            startup_path = windows_startup_script_path()
+            write_windows_startup_script(startup_path, start_command)
+            print(f"Installed Windows Startup fallback: {startup_path}")
+            if args.now:
+                now_command = spark_invocation_args() + ["start", "--allow-boot-warnings", target]
+                result = run_autostart_helper(now_command)
+                if result.returncode != 0:
+                    print_helper_failure(now_command, result)
+                    print(f"Manual fallback for this session: {start_command}")
+                    return 1
+            print("Spark will start at login with: " + start_command)
+            return 0
         print(f"Installed Windows logon task: {AUTOSTART_WINDOWS_TASK_NAME}")
         if args.now:
-            result = run_autostart_helper(["schtasks", "/Run", "/TN", AUTOSTART_WINDOWS_TASK_NAME])
+            now_command = ["schtasks", "/Run", "/TN", AUTOSTART_WINDOWS_TASK_NAME]
+            result = run_autostart_helper(now_command)
             if result.returncode != 0:
-                print_helper_failure(["schtasks", "/Run", "/TN", AUTOSTART_WINDOWS_TASK_NAME], result)
+                print_helper_failure(now_command, result)
                 print(f"Manual fallback for this session: {start_command}")
                 return 1
         print("Spark will start at login with: " + task_command)
@@ -2522,9 +2562,15 @@ def cmd_autostart_uninstall(_: argparse.Namespace) -> int:
         result = run_autostart_helper(["schtasks", "/Delete", "/TN", AUTOSTART_WINDOWS_TASK_NAME, "/F"])
         if result.returncode != 0:
             print_helper_failure(["schtasks", "/Delete", "/TN", AUTOSTART_WINDOWS_TASK_NAME, "/F"], result)
-            return 1
-        print(f"Removed Windows logon task: {AUTOSTART_WINDOWS_TASK_NAME}")
-        return 0
+            failures += 1
+        else:
+            print(f"Removed Windows logon task: {AUTOSTART_WINDOWS_TASK_NAME}")
+        startup_path = windows_startup_script_path()
+        if startup_path.exists():
+            startup_path.unlink()
+            print(f"Removed Windows Startup fallback: {startup_path}")
+            failures = 0 if failures else failures
+        return 1 if failures else 0
 
     raise SystemExit(f"Autostart is not supported on this platform yet: {sys.platform}")
 
@@ -2548,7 +2594,13 @@ def cmd_autostart_status(_: argparse.Namespace) -> int:
     if sys.platform == "win32":
         result = run_autostart_helper(["schtasks", "/Query", "/TN", AUTOSTART_WINDOWS_TASK_NAME])
         print(f"Windows task: {AUTOSTART_WINDOWS_TASK_NAME}")
-        print("Installed: " + ("yes" if result.returncode == 0 else "no"))
+        task_installed = result.returncode == 0
+        startup_path = windows_startup_script_path()
+        startup_installed = startup_path.exists()
+        print("Installed: " + ("yes" if task_installed or startup_installed else "no"))
+        print("Task installed: " + ("yes" if task_installed else "no"))
+        print(f"Startup fallback: {startup_path}")
+        print("Startup fallback installed: " + ("yes" if startup_installed else "no"))
         return 0
     raise SystemExit(f"Autostart is not supported on this platform yet: {sys.platform}")
 
