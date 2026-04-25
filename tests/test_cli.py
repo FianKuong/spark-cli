@@ -1737,6 +1737,8 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("SPARK_LOCAL_REGISTRY", script)
         self.assertIn('export SPARK_HOME="$SPARK_PREFIX"', script)
         self.assertIn('"$SPARK_PREFIX/bin/spark" setup "$SPARK_BUNDLE"', script)
+        self.assertIn('local spark_setup_cmd=("$SPARK_PREFIX/bin/spark" setup "$SPARK_BUNDLE")', script)
+        self.assertNotIn('"${setup_words[@]}" "${extra_setup_args[@]}"', script)
         self.assertIn("spark_cli.cli", script)
 
     def test_windows_install_script_bootstraps_local_prefix_contract(self) -> None:
