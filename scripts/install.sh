@@ -21,6 +21,7 @@ SPARK_ANTHROPIC_API_KEY="${SPARK_ANTHROPIC_API_KEY:-}"
 SPARK_NON_INTERACTIVE_SETUP="${SPARK_NON_INTERACTIVE_SETUP:-0}"
 SPARK_SETUP_SKIP_INSTALL_COMMANDS="${SPARK_SETUP_SKIP_INSTALL_COMMANDS:-0}"
 SPARK_SETUP_SKIP_RUNTIME_CHECK="${SPARK_SETUP_SKIP_RUNTIME_CHECK:-0}"
+SPARK_SHELL_PROFILE="${SPARK_SHELL_PROFILE:-auto}"
 SPARK_NODE_BIN_DIR=""
 SPARK_CANONICAL_CLI_SOURCE="https://github.com/vibeforge1111/spark-cli"
 SPARK_ALLOW_DEV_SOURCE="${SPARK_ALLOW_DEV_SOURCE:-0}"
@@ -50,6 +51,7 @@ Options:
   --setup-skip-runtime-check
                             Pass --skip-runtime-check to setup
   --setup-arg ARG           Extra arg passed to `spark setup`; repeatable
+  --no-shell-profile        Do not add Spark to the user's shell profile
   --local-registry PATH     developer registry override; requires --allow-dev-source
   --allow-dev-source        Allow source/ref/local-registry overrides for local development
   --skip-setup              Install CLI only; do not run spark setup
@@ -63,7 +65,7 @@ Environment mirrors these flags:
   SPARK_BOT_TOKEN, SPARK_ADMIN_TELEGRAM_IDS, SPARK_LLM_PROVIDER,
   SPARK_ZAI_API_KEY, SPARK_OPENAI_API_KEY, SPARK_ANTHROPIC_API_KEY,
   SPARK_NON_INTERACTIVE_SETUP, SPARK_SETUP_SKIP_INSTALL_COMMANDS,
-  SPARK_SETUP_SKIP_RUNTIME_CHECK,
+  SPARK_SETUP_SKIP_RUNTIME_CHECK, SPARK_SHELL_PROFILE,
   SPARK_NODE_PLATFORM.
 EOF
 }
@@ -103,6 +105,8 @@ while [ "$#" -gt 0 ]; do
       SPARK_SETUP_SKIP_RUNTIME_CHECK=1; shift ;;
     --setup-arg)
       extra_setup_args+=("$2"); shift 2 ;;
+    --no-shell-profile)
+      SPARK_SHELL_PROFILE=0; shift ;;
     --local-registry)
       SPARK_LOCAL_REGISTRY="$2"; shift 2 ;;
     --allow-dev-source)
@@ -342,6 +346,57 @@ EOF
   log "Wrote shell env helper $env_file"
 }
 
+write_shell_profile_hook() {
+  if [ "$SPARK_SHELL_PROFILE" = "0" ]; then
+    log "Skipping shell profile update"
+    return
+  fi
+
+  local default_prefix
+  default_prefix="$(normalize_path "$HOME/.spark")"
+  if [ "$SPARK_SHELL_PROFILE" = "auto" ] && [ "$SPARK_PREFIX" != "$default_prefix" ]; then
+    log "Skipping shell profile update for non-default prefix $SPARK_PREFIX"
+    return
+  fi
+
+  local profile=""
+  local shell_name
+  shell_name="$(basename "${SHELL:-}")"
+  case "$shell_name" in
+    zsh)
+      profile="$HOME/.zshrc"
+      ;;
+    bash)
+      if [ "$(uname -s)" = "Darwin" ]; then
+        profile="$HOME/.bash_profile"
+      else
+        profile="$HOME/.bashrc"
+      fi
+      ;;
+    *)
+      profile="$HOME/.profile"
+      ;;
+  esac
+
+  mkdir -p "$(dirname "$profile")"
+  touch "$profile"
+  if grep -F "$SPARK_PREFIX/env" "$profile" >/dev/null 2>&1; then
+    log "Shell profile already sources $SPARK_PREFIX/env"
+    return
+  fi
+  if [ "$SPARK_PREFIX" = "$default_prefix" ] && grep -F '$HOME/.spark/env' "$profile" >/dev/null 2>&1; then
+    log "Shell profile already sources $SPARK_PREFIX/env"
+    return
+  fi
+
+  cat >> "$profile" <<EOF
+
+# Spark CLI
+[ -f "$SPARK_PREFIX/env" ] && source "$SPARK_PREFIX/env"
+EOF
+  log "Added Spark CLI to shell profile $profile"
+}
+
 run_setup() {
   if [ "$SPARK_SKIP_SETUP" = "1" ]; then
     log "Skipping spark setup"
@@ -442,6 +497,7 @@ main() {
   checkout_cli
   install_cli_venv
   write_wrapper
+  write_shell_profile_hook
   run_setup
   run_autostart
   log "Done."
@@ -455,7 +511,7 @@ Spark command:
 To use \`spark\` by name in this terminal:
   source "$SPARK_PREFIX/env"
 
-To make that permanent, add this line to your shell profile:
+For default installs, the installer also adds this line to your shell profile:
   source "$SPARK_PREFIX/env"
 
 Operational checks:
