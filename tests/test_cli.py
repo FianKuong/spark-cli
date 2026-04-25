@@ -15,6 +15,7 @@ from typing import Any
 from unittest.mock import patch
 
 from spark_cli.cli import (
+    append_process_log,
     build_module_repair_hints,
     build_parser,
     build_status_repair_hints,
@@ -93,6 +94,7 @@ from spark_cli.cli import (
     remove_managed_env_block,
     pid_is_running,
     print_install_summary,
+    process_runtime_detail,
     format_start_warning,
     ready_timeout_seconds,
     read_generated_env,
@@ -1768,6 +1770,22 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(warning.count("process exited with code 1"), 1)
         self.assertIn("spark logs spark-telegram-bot --lines 80", warning)
 
+    def test_process_runtime_detail_names_missing_and_running_modules(self) -> None:
+        pids = {
+            "spark-telegram-bot": {"pid": 101},
+            "spawner-ui": {"pid": 102},
+        }
+
+        def fake_running(pid: int) -> bool:
+            return pid == 102
+
+        with patch("spark_cli.cli.pid_is_running", side_effect=fake_running):
+            ok, detail = process_runtime_detail(pids, ["spark-telegram-bot", "spawner-ui"])
+
+        self.assertFalse(ok)
+        self.assertIn("spark-telegram-bot", detail)
+        self.assertIn("spawner-ui (pid 102)", detail)
+
     def test_start_module_allows_boot_warning_when_process_keeps_running(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             module = Module(
@@ -2342,6 +2360,18 @@ class SparkCliTests(unittest.TestCase):
             last_three = tail_log_lines(log_path, 3)
             self.assertEqual(last_three, ["line-8\n", "line-9\n", "line-10\n"])
 
+    def test_append_process_log_writes_spark_owned_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            log_dir = Path(tmp_dir) / "logs"
+            with patch("spark_cli.cli.LOG_DIR", log_dir), \
+                 patch("spark_cli.cli.timestamp_now", return_value="2026-04-25T12:00:00Z"):
+                append_process_log("spark-telegram-bot", "start warning detail")
+
+            log_path = log_dir / "spark-telegram-bot" / "process.log"
+            contents = log_path.read_text(encoding="utf-8")
+
+        self.assertIn("[spark-cli 2026-04-25T12:00:00Z] start warning detail", contents)
+
     def test_tail_log_lines_returns_all_when_lines_is_zero(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             log_path = Path(tmp_dir) / "process.log"
@@ -2886,6 +2916,8 @@ class SparkCliTests(unittest.TestCase):
         self.assertFalse(checks["builder_memory_bridge"]["ok"])
         self.assertFalse(checks["spawner_mission_relay"]["ok"])
         self.assertFalse(checks["runtime_processes"]["ok"])
+        self.assertIn("spark-telegram-bot", checks["runtime_processes"]["detail"])
+        self.assertIn("spawner-ui", checks["runtime_processes"]["detail"])
 
     def test_collect_verify_payload_accepts_legacy_spawner_bot_default_provider(self) -> None:
         expected = ["spark-researcher", "spark-intelligence-builder", "domain-chip-memory", "spawner-ui", "spark-telegram-bot"]

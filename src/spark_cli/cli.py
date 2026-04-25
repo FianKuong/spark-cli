@@ -2820,13 +2820,13 @@ def collect_verify_payload(*, deep: bool = False) -> dict[str, Any]:
         }
     )
 
-    process_ok = running("spark-telegram-bot") and running("spawner-ui")
+    process_ok, process_detail = process_runtime_detail(pids, ["spark-telegram-bot", "spawner-ui"])
     checks.append(
         {
             "name": "runtime_processes",
             "ok": process_ok,
             "required": True,
-            "detail": "Telegram bot and Spawner UI are running under Spark supervision." if process_ok else "Telegram bot and/or Spawner UI are not running under Spark supervision.",
+            "detail": process_detail,
             "repair": "spark start telegram-starter",
         }
     )
@@ -3077,6 +3077,23 @@ def format_start_warning(module: Module, detail: str, process: subprocess.Popen[
     return f"{detail}. The process is still running and may still be booting. {log_hint}"
 
 
+def process_runtime_detail(pids: dict[str, Any], module_names: list[str]) -> tuple[bool, str]:
+    missing: list[str] = []
+    running_names: list[str] = []
+    for name in module_names:
+        record = pids.get(name) if isinstance(pids, dict) else None
+        pid = int(record.get("pid", 0)) if isinstance(record, dict) else 0
+        if pid and pid_is_running(pid):
+            running_names.append(f"{name} (pid {pid})")
+        else:
+            missing.append(name)
+    if not missing:
+        return True, "Runtime processes are running under Spark supervision: " + ", ".join(running_names) + "."
+    if running_names:
+        return False, "Missing Spark-supervised runtime process(es): " + ", ".join(missing) + f". Running: {', '.join(running_names)}."
+    return False, "Missing Spark-supervised runtime process(es): " + ", ".join(missing) + "."
+
+
 def start_module(module: Module, *, allow_boot_warnings: bool = False) -> bool:
     command = module.run_command
     if not command:
@@ -3095,6 +3112,7 @@ def start_module(module: Module, *, allow_boot_warnings: bool = False) -> bool:
     module_log_dir = LOG_DIR / module.name
     module_log_dir.mkdir(parents=True, exist_ok=True)
     log_path = module_log_dir / "process.log"
+    append_process_log(module.name, f"starting command={command!r} cwd={module.path} ready_check={module.ready_check!r}")
     log_handle = log_path.open("a", encoding="utf-8")
 
     subprocess_env = module_runtime_env(module)
@@ -3127,8 +3145,11 @@ def start_module(module: Module, *, allow_boot_warnings: bool = False) -> bool:
     ready, detail = wait_for_ready_check(module, process=process)
     if ready:
         print(f"Ready {module.name}: {detail}")
+        append_process_log(module.name, f"ready pid={process.pid} detail={detail}")
     else:
-        print(f"Start warning for {module.name}: {format_start_warning(module, detail, process)}")
+        warning = format_start_warning(module, detail, process)
+        print(f"Start warning for {module.name}: {warning}")
+        append_process_log(module.name, f"start warning pid={process.pid} detail={warning}")
         if process.poll() is not None:
             latest_pids = load_pids()
             latest_record = latest_pids.get(module.name, {})
@@ -3521,6 +3542,13 @@ def cmd_autostart_status(_: argparse.Namespace) -> int:
 
 def module_log_path(module_name: str) -> Path:
     return LOG_DIR / module_name / "process.log"
+
+
+def append_process_log(module_name: str, message: str) -> None:
+    path = module_log_path(module_name)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", errors="replace") as handle:
+        handle.write(f"[spark-cli {timestamp_now()}] {message.rstrip()}\n")
 
 
 def tail_log_lines(path: Path, line_count: int) -> list[str]:
