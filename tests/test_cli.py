@@ -1327,6 +1327,34 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("http://127.0.0.1:5173/api/providers did not become ready within 1s", detail)
         self.assertIn("last error:", detail)
 
+    def test_wait_for_ready_check_retries_transient_http_reset(self) -> None:
+        module = Module(
+            name="http-target",
+            path=Path("C:/tmp/http-target"),
+            manifest={
+                "module": {"name": "http-target", "version": "0.1.0", "kind": "service", "plane": "execution"},
+                "run": {"default": {"ready_check": "http://127.0.0.1:5173/api/providers"}},
+                "healthcheck": {"timeout_seconds": 3},
+            },
+        )
+
+        class ReadyResponse:
+            status = 200
+
+            def __enter__(self) -> "ReadyResponse":
+                return self
+
+            def __exit__(self, *args: object) -> None:
+                return None
+
+        with patch("spark_cli.cli.urllib.request.urlopen", side_effect=[ConnectionResetError("reset"), ReadyResponse()]), \
+             patch("spark_cli.cli.time.time", side_effect=[100.0, 100.5, 101.5]), \
+             patch("spark_cli.cli.time.sleep", return_value=None):
+            ready, detail = wait_for_ready_check(module)
+
+        self.assertTrue(ready)
+        self.assertEqual(detail, "http://127.0.0.1:5173/api/providers")
+
     def test_wait_for_ready_check_stops_when_http_process_exits(self) -> None:
         module = Module(
             name="http-target",

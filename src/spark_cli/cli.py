@@ -2173,7 +2173,7 @@ def wait_for_ready_check(module: Module, process: subprocess.Popen[Any] | None =
                     if 200 <= int(response.status) < 400:
                         return True, ready_check
                     last_error = f"ready check returned HTTP {response.status}"
-            except (urllib.error.URLError, TimeoutError) as error:
+            except (urllib.error.URLError, TimeoutError, OSError) as error:
                 last_error = str(error)
         else:
             result = run_shell(ready_check, module.path, env=module_runtime_env(module), timeout=timeout_seconds)
