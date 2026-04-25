@@ -2139,7 +2139,7 @@ def format_start_warning(module: Module, detail: str, process: subprocess.Popen[
     return f"{detail}. The process is still running and may still be booting. {log_hint}"
 
 
-def start_module(module: Module) -> bool:
+def start_module(module: Module, *, allow_boot_warnings: bool = False) -> bool:
     command = module.run_command
     if not command:
         return True
@@ -2165,15 +2165,18 @@ def start_module(module: Module) -> bool:
 
     subprocess_env = module_runtime_env(module)
 
-    process = subprocess.Popen(
-        command,
-        cwd=str(module.path),
-        shell=True,
-        stdout=log_handle,
-        stderr=subprocess.STDOUT,
-        creationflags=creationflags,
-        env=subprocess_env,
-    )
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=str(module.path),
+            shell=True,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            creationflags=creationflags,
+            env=subprocess_env,
+        )
+    finally:
+        log_handle.close()
     pids[module.name] = {
         "pid": process.pid,
         "command": command,
@@ -2189,6 +2192,8 @@ def start_module(module: Module) -> bool:
         print(f"Ready {module.name}: {detail}")
     else:
         print(f"Start warning for {module.name}: {format_start_warning(module, detail, process)}")
+        if allow_boot_warnings and process.poll() is None:
+            return True
     return ready
 
 
@@ -2204,7 +2209,7 @@ def cmd_start(args: argparse.Namespace) -> int:
         if not module.run_command:
             print(f"Skipping {module.name}: no run.default command declared")
             continue
-        if not start_module(module):
+        if not start_module(module, allow_boot_warnings=getattr(args, "allow_boot_warnings", False)):
             exit_code = 1
     return exit_code
 
@@ -2237,6 +2242,10 @@ def cmd_stop(args: argparse.Namespace) -> int:
 
 
 def spark_invocation_args() -> list[str]:
+    wrapper_name = "spark.cmd" if os.name == "nt" else "spark"
+    spark_home_wrapper = SPARK_HOME / "bin" / wrapper_name
+    if spark_home_wrapper.exists():
+        return [str(spark_home_wrapper.resolve())]
     argv0 = Path(str(sys.argv[0])).expanduser()
     if argv0.exists() and argv0.suffix.lower() not in {".py", ".pyc"}:
         return [str(argv0.resolve())]
@@ -2253,7 +2262,11 @@ def shell_join(args: list[str]) -> str:
 
 
 def autostart_shell_command(action: str, target: str) -> str:
-    return shell_join(spark_invocation_args() + [action, target])
+    args = spark_invocation_args() + [action]
+    if action == "start":
+        args.append("--allow-boot-warnings")
+    args.append(target)
+    return shell_join(args)
 
 
 def render_systemd_autostart_unit(*, target: str, start_command: str, stop_command: str) -> str:
@@ -2394,6 +2407,7 @@ def cmd_autostart_install(args: argparse.Namespace) -> int:
         print(f"Installed Spark LaunchAgent: {plist_path}")
         uid = str(os.getuid()) if hasattr(os, "getuid") else ""
         bootstrap_domain = f"gui/{uid}" if uid else "gui"
+        run_autostart_helper(["launchctl", "bootout", bootstrap_domain, str(plist_path)])
         command = ["launchctl", "bootstrap", bootstrap_domain, str(plist_path)]
         result = run_autostart_helper(command)
         if result.returncode != 0:
@@ -3127,6 +3141,7 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall_parser.set_defaults(func=cmd_uninstall)
 
     start_parser = subparsers.add_parser("start", help="Start startable modules")
+    start_parser.add_argument("--allow-boot-warnings", action="store_true", help=argparse.SUPPRESS)
     start_parser.add_argument("target", nargs="?")
     start_parser.set_defaults(func=cmd_start)
 

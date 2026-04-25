@@ -95,6 +95,7 @@ from spark_cli.cli import (
     run_setup_wizard,
     shell_command_env,
     setup_is_interactive,
+    start_module,
     wait_for_ready_check,
     resolve_bundle_names,
     resolve_install_target,
@@ -648,17 +649,28 @@ class SparkCliTests(unittest.TestCase):
         with patch("spark_cli.cli.spark_invocation_args", return_value=["/tmp/spark"]):
             self.assertEqual(
                 autostart_shell_command("start", "telegram-starter"),
-                "/tmp/spark start telegram-starter",
+                "/tmp/spark start --allow-boot-warnings telegram-starter",
             )
 
     def test_spark_invocation_args_uses_python_module_when_running_source_file(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            cli_file = Path(tmp_dir) / "cli.py"
+            tmp_path = Path(tmp_dir)
+            cli_file = tmp_path / "cli.py"
             cli_file.write_text("pass\n", encoding="utf-8")
             with patch("spark_cli.cli.sys.argv", [str(cli_file)]), \
                  patch("spark_cli.cli.shutil.which", return_value=None), \
+                 patch("spark_cli.cli.SPARK_HOME", tmp_path / ".spark"), \
                  patch("spark_cli.cli.sys.executable", "/usr/bin/python3"):
                 self.assertEqual(spark_invocation_args(), ["/usr/bin/python3", "-m", "spark_cli.cli"])
+
+    def test_spark_invocation_args_prefers_installed_wrapper_for_autostart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            spark_home = Path(tmp_dir) / ".spark"
+            wrapper = spark_home / "bin" / ("spark.cmd" if os.name == "nt" else "spark")
+            wrapper.parent.mkdir(parents=True)
+            wrapper.write_text("", encoding="utf-8")
+            with patch("spark_cli.cli.SPARK_HOME", spark_home):
+                self.assertEqual(spark_invocation_args(), [str(wrapper.resolve())])
 
     def test_autostart_install_linux_writes_service_and_enables_it(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -679,11 +691,34 @@ class SparkCliTests(unittest.TestCase):
                 self.assertEqual(args.func(args), 0)
 
             unit = service_path.read_text(encoding="utf-8")
-            self.assertIn("/tmp/spark start telegram-starter", unit)
+            self.assertIn("/tmp/spark start --allow-boot-warnings telegram-starter", unit)
             self.assertIn("/tmp/spark stop telegram-starter", unit)
             self.assertIn(["systemctl", "--user", "daemon-reload"], commands)
             self.assertIn(["systemctl", "--user", "enable", service_path.name], commands)
             self.assertIn(["systemctl", "--user", "restart", service_path.name], commands)
+
+    def test_autostart_install_macos_replaces_existing_launch_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            plist_path = Path(tmp_dir) / "ai.sparkswarm.spark-telegram-agent.plist"
+            commands: list[list[str]] = []
+
+            def fake_helper(command: list[str]) -> subprocess.CompletedProcess[str]:
+                commands.append(command)
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            args = build_parser().parse_args(["autostart", "install", "--now"])
+            with patch("spark_cli.cli.sys.platform", "darwin"), \
+                 patch("spark_cli.cli.macos_autostart_path", return_value=plist_path), \
+                 patch("spark_cli.cli.spark_invocation_args", return_value=["/tmp/spark"]), \
+                 patch("spark_cli.cli.os.getuid", return_value=501, create=True), \
+                 patch("spark_cli.cli.run_autostart_helper", side_effect=fake_helper), \
+                 patch("sys.stdout", new_callable=StringIO):
+                self.assertEqual(args.func(args), 0)
+
+            self.assertTrue(plist_path.exists())
+            self.assertIn(["launchctl", "bootout", "gui/501", str(plist_path)], commands)
+            self.assertIn(["launchctl", "bootstrap", "gui/501", str(plist_path)], commands)
+            self.assertIn(["launchctl", "kickstart", "-k", "gui/501/ai.sparkswarm.spark-telegram-agent"], commands)
 
     def test_guide_prints_normie_onboarding_surface(self) -> None:
         args = build_parser().parse_args(["guide"])
@@ -1253,6 +1288,58 @@ class SparkCliTests(unittest.TestCase):
         warning = format_start_warning(module, "not ready", ExitedProcess())  # type: ignore[arg-type]
         self.assertIn("exited with code 1", warning)
         self.assertIn("spark logs spawner-ui --lines 80", warning)
+
+    def test_start_module_allows_boot_warning_when_process_keeps_running(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            module = Module(
+                name="slow-spawner",
+                path=Path(tmp_dir),
+                manifest={
+                    "module": {"name": "slow-spawner", "version": "0.1.0", "kind": "app", "plane": "execution"},
+                    "run": {"default": {"command": "npm run dev", "ready_check": "http://127.0.0.1:5173"}},
+                },
+            )
+
+            class RunningProcess:
+                pid = 12345
+
+                def poll(self) -> None:
+                    return None
+
+            with patch("spark_cli.cli.load_pids", return_value={}), \
+                 patch("spark_cli.cli.save_pids"), \
+                 patch("spark_cli.cli.LOG_DIR", Path(tmp_dir) / "logs"), \
+                 patch("spark_cli.cli.module_runtime_env", return_value={}), \
+                 patch("spark_cli.cli.subprocess.Popen", return_value=RunningProcess()), \
+                 patch("spark_cli.cli.wait_for_ready_check", return_value=(False, "not ready yet")), \
+                 patch("sys.stdout", new_callable=StringIO):
+                self.assertTrue(start_module(module, allow_boot_warnings=True))
+
+    def test_start_module_fails_boot_warning_when_process_exits(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            module = Module(
+                name="failed-spawner",
+                path=Path(tmp_dir),
+                manifest={
+                    "module": {"name": "failed-spawner", "version": "0.1.0", "kind": "app", "plane": "execution"},
+                    "run": {"default": {"command": "npm run dev", "ready_check": "http://127.0.0.1:5173"}},
+                },
+            )
+
+            class ExitedProcess:
+                pid = 12346
+
+                def poll(self) -> int:
+                    return 1
+
+            with patch("spark_cli.cli.load_pids", return_value={}), \
+                 patch("spark_cli.cli.save_pids"), \
+                 patch("spark_cli.cli.LOG_DIR", Path(tmp_dir) / "logs"), \
+                 patch("spark_cli.cli.module_runtime_env", return_value={}), \
+                 patch("spark_cli.cli.subprocess.Popen", return_value=ExitedProcess()), \
+                 patch("spark_cli.cli.wait_for_ready_check", return_value=(False, "not ready yet")), \
+                 patch("sys.stdout", new_callable=StringIO):
+                self.assertFalse(start_module(module, allow_boot_warnings=True))
 
     def test_required_runtimes_for_modules_dedups_across_bundle(self) -> None:
         python_module = Module(
