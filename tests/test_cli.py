@@ -306,6 +306,37 @@ class SparkCliTests(unittest.TestCase):
             self.assertFalse(path.exists())
             self.assertFalse(list(Path(tmp_dir).glob(".state.json.*.tmp")))
 
+    def test_atomic_write_json_refuses_symlink_leaf(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            target = root / "target.json"
+            target.write_text('{"owned": true}\n', encoding="utf-8")
+            link = root / "state.json"
+            try:
+                link.symlink_to(target)
+            except (NotImplementedError, OSError) as exc:
+                self.skipTest(f"symlink creation unavailable: {exc}")
+
+            with self.assertRaises(SystemExit) as error:
+                atomic_write_json(link, {"ok": True})
+
+            self.assertIn("linked path", str(error.exception))
+            self.assertEqual(load_json(target, {}), {"owned": True})
+            self.assertFalse(list(root.glob(".state.json.*.tmp")))
+
+    def test_atomic_write_json_refuses_reparse_point_leaf(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "state.json"
+            path.write_text('{"owned": true}\n', encoding="utf-8")
+
+            with patch("spark_cli.cli._path_is_reparse_point", side_effect=lambda item: item == path):
+                with self.assertRaises(SystemExit) as error:
+                    atomic_write_json(path, {"ok": True})
+
+            self.assertIn("linked path", str(error.exception))
+            self.assertEqual(load_json(path, {}), {"owned": True})
+            self.assertFalse(list(Path(tmp_dir).glob(".state.json.*.tmp")))
+
     def test_telegram_profile_helpers_scope_only_bot_processes(self) -> None:
         self.assertEqual(normalize_telegram_profile(None), "default")
         self.assertEqual(normalize_telegram_profile("Spark-AGI"), "spark-agi")

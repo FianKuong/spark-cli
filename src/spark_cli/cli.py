@@ -894,6 +894,28 @@ def sha256_file(path: Path) -> str:
     return sha256_bytes(path.read_bytes())
 
 
+def _path_is_reparse_point(path: Path) -> bool:
+    if path.is_symlink():
+        return True
+    try:
+        attrs = path.lstat().st_file_attributes
+    except (AttributeError, OSError):
+        return False
+    return bool(attrs & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0))
+
+
+def assert_no_linked_write_path(path: Path) -> None:
+    expanded = path.expanduser()
+    chain = [*reversed(expanded.parent.parents), expanded.parent]
+    if expanded.exists() or expanded.is_symlink():
+        chain.append(expanded)
+    for item in chain:
+        if not item.exists() and not item.is_symlink():
+            continue
+        if _path_is_reparse_point(item):
+            raise SystemExit(f"Refusing private write through linked path: {item}")
+
+
 def installer_manifest_payload() -> dict[str, Any]:
     return {
         "schema": 1,
@@ -972,6 +994,7 @@ def collect_installer_integrity_payload(*, hosted: bool = False) -> dict[str, An
 
 
 def atomic_write_json(path: Path, payload: Any) -> None:
+    assert_no_linked_write_path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_name(f".{path.name}.{os.getpid()}.{py_secrets.token_hex(4)}.tmp")
     try:
