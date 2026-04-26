@@ -2912,6 +2912,27 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(args.llm_provider, "zai")
         self.assertEqual(values["llm.zai.api_key"], "zai-test-key")
 
+    def test_run_llm_provider_wizard_can_force_one_provider_for_all_roles(self) -> None:
+        class Args:
+            llm_provider = None
+            chat_llm_provider = None
+            builder_llm_provider = None
+            memory_llm_provider = None
+            mission_llm_provider = None
+
+        args = Args()
+        with patch("builtins.input", side_effect=["zai", "2"]), \
+             patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "codex"}), \
+             patch("spark_cli.cli.getpass.getpass", return_value="zai-test-key"):
+            values = run_llm_provider_wizard(args, {})
+
+        self.assertEqual(args.llm_provider, "zai")
+        self.assertEqual(args.chat_llm_provider, "zai")
+        self.assertEqual(args.builder_llm_provider, "zai")
+        self.assertEqual(args.memory_llm_provider, "zai")
+        self.assertEqual(args.mission_llm_provider, "zai")
+        self.assertEqual(values["llm.zai.api_key"], "zai-test-key")
+
     def test_run_llm_provider_wizard_collects_key_for_explicit_zai_selection(self) -> None:
         class Args:
             llm_provider = "zai"
@@ -2957,11 +2978,17 @@ class SparkCliTests(unittest.TestCase):
         args = Args()
         with patch("builtins.input", side_effect=["", ""]), \
              patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "codex"}), \
+             patch("sys.stdout", new_callable=StringIO) as stdout, \
              patch("spark_cli.cli.getpass.getpass") as getpass_mock:
             values = run_llm_provider_wizard(args, {})
         self.assertEqual(args.llm_provider, "openai")
         self.assertEqual(values, {})
         getpass_mock.assert_not_called()
+        output = stdout.getvalue()
+        self.assertIn("recommended OpenAI/Codex path", output)
+        self.assertIn("ChatGPT/Codex sign-in detected", output)
+        self.assertIn("Recommended: use this provider for chat/Builder/memory", output)
+        self.assertIn("Use one provider for every role", output)
 
     def test_collect_secret_values_prompts_when_interactive_and_missing(self) -> None:
         module = Module(

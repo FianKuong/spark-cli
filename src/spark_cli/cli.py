@@ -1075,6 +1075,23 @@ LLM_PROVIDER_AUTH_HINTS = {
 }
 
 
+def describe_llm_provider_setup(provider: str) -> str:
+    spec = LLM_PROVIDER_ENV[provider]
+    auth_hint = LLM_PROVIDER_AUTH_HINTS[provider]
+    status = ""
+    if provider == "openai":
+        status = "ChatGPT/Codex sign-in detected" if detect_codex_cli()["present"] else "use OPENAI_API_KEY or run `codex` to sign in"
+    elif provider == "codex":
+        status = "Codex CLI detected" if detect_codex_cli()["present"] else "run `codex` to sign in first"
+    elif provider == "anthropic":
+        status = "Claude Code detected" if detect_claude_code()["present"] else "use ANTHROPIC_API_KEY or run `claude` to sign in"
+    elif provider == "ollama":
+        status = "local Ollama server"
+    elif provider == "zai":
+        status = "uses the GLM coding endpoint API key"
+    return f"{LLM_PROVIDER_LABELS[provider]} ({spec['model_default']}; {auth_hint}; {status})"
+
+
 def setup_has_llm_provider_selection(args: argparse.Namespace) -> bool:
     if getattr(args, "llm_provider", None):
         return True
@@ -1155,13 +1172,12 @@ def run_llm_provider_wizard(args: argparse.Namespace, secret_values: dict[str, s
         return collect_provider_api_keys(selected_llm_providers(args, secret_values), secret_values)
     print("")
     print("Choose Spark LLM provider")
-    print("  Pick the default LLM for chat, Builder, memory, and missions.")
-    print("  You can keep one provider for everything, or customize each role next.")
+    print("  Pick the provider Spark should use for normal chat, Builder, and memory.")
+    print("  Missions can use a local executor like Codex or Claude when available.")
+    print("  Press Enter for the recommended OpenAI/Codex path, or type a number/provider name.")
     for index, provider in enumerate(LLM_PROVIDER_WIZARD_ORDER, start=1):
-        spec = LLM_PROVIDER_ENV[provider]
-        label = LLM_PROVIDER_LABELS[provider]
-        auth_hint = LLM_PROVIDER_AUTH_HINTS[provider]
-        print(f"  {index}. {label} ({spec['model_default']}; {auth_hint})")
+        suffix = " [recommended]" if provider == "openai" else ""
+        print(f"  {index}. {describe_llm_provider_setup(provider)}{suffix}")
     print("  0. Skip for now")
     provider = prompt_for_provider_choice("Provider [1/OpenAI, 0 to skip]: ", "openai")
     if provider is None:
@@ -1171,10 +1187,18 @@ def run_llm_provider_wizard(args: argparse.Namespace, secret_values: dict[str, s
     setattr(args, "llm_provider", provider)
 
     try:
-        split_roles = input("Use different providers for chat/building/memory/missions? [y/N]: ").strip().lower()
+        print("")
+        print("Role setup")
+        print("  1. Recommended: use this provider for chat/Builder/memory, and a local executor for missions when available.")
+        print("  2. Use one provider for every role.")
+        print("  3. Customize chat, Builder, memory, and mission providers.")
+        split_roles = input("Role setup [1]: ").strip().lower()
     except EOFError:
         split_roles = ""
-    if split_roles in {"y", "yes"}:
+    if split_roles in {"2", "same", "one", "all"}:
+        for role in LLM_ROLES:
+            setattr(args, f"{role}_llm_provider", provider)
+    elif split_roles in {"3", "custom", "customize", "customise", "y", "yes"}:
         for role in LLM_ROLES:
             label = LLM_ROLE_LABELS[role]
             chosen = prompt_for_provider_choice(f"  {label} provider [{provider}]: ", provider)
@@ -2419,7 +2443,7 @@ def print_setup_next_steps(bundle_name: str, ingress_owner: Module, llm_state: d
     model = llm_state.get("model") or "not configured"
     roles = llm_state.get("roles") if isinstance(llm_state.get("roles"), dict) else {}
     print("")
-    print("Next steps:")
+    print("Spark is installed. Next steps:")
     print("  1. Verify the install:")
     print("     spark status")
     print("  2. Make Spark start when this computer logs in:")
@@ -2446,8 +2470,9 @@ def print_setup_next_steps(bundle_name: str, ingress_owner: Module, llm_state: d
             )
     print("Need a bot token? Open @BotFather in Telegram, run /newbot, then rerun:")
     print(f"     spark setup {bundle_name}")
-    print("Need to choose or change LLMs? Rerun setup with --llm-provider or the role flags: --chat-llm-provider, --builder-llm-provider, --memory-llm-provider, --mission-llm-provider.")
-    print("OpenAI can use an OPENAI_API_KEY or a signed-in Codex CLI (`codex`); Anthropic can use an API key or Claude Code (`claude`).")
+    print("Need to choose or change LLMs? Run `spark setup` for the guided picker, or use role flags for automation.")
+    print("OpenAI can use a signed-in Codex/ChatGPT session (`codex`) or OPENAI_API_KEY; Anthropic can use Claude Code (`claude`) or ANTHROPIC_API_KEY.")
+    print("For role-level control, use --chat-llm-provider, --builder-llm-provider, --memory-llm-provider, and --mission-llm-provider.")
     print("Need to turn the agent off? Run `spark stop telegram-starter` or `spark autostart uninstall`.")
     print("Run `spark guide` anytime for BotFather, LLM, module, and Telegram command help.")
 
@@ -4972,6 +4997,7 @@ def onboarding_guide_payload() -> dict[str, Any]:
                 {"role": "mission", "use": "Spawner missions, coding/build work, and execution tasks."},
             ],
             "llm_examples": [
+                "spark setup",
                 "spark setup --llm-provider codex --codex-model gpt-5.5",
                 "spark setup --llm-provider openai",
                 "spark setup --llm-provider openai --openai-api-key <OPENAI_API_KEY> --openai-model gpt-5.5",
@@ -4981,7 +5007,7 @@ def onboarding_guide_payload() -> dict[str, Any]:
                 "spark setup --llm-provider ollama --ollama-url http://localhost:11434 --ollama-model <MODEL>",
                 "spark setup --chat-llm-provider openai --builder-llm-provider openai --memory-llm-provider ollama --mission-llm-provider openai",
             ],
-            "llm_auth_note": "OpenAI can use a signed-in Codex CLI or OPENAI_API_KEY. Anthropic can use Claude Code or ANTHROPIC_API_KEY. Z.AI uses ZAI_API_KEY. Ollama is local. If your default chat LLM is not a local executor, Spark uses Codex or Claude for mission/build execution when available.",
+            "llm_auth_note": "The easiest path is `spark setup` and the guided picker. OpenAI can use a signed-in Codex CLI / ChatGPT session or OPENAI_API_KEY. Anthropic can use Claude Code or ANTHROPIC_API_KEY. Z.AI uses ZAI_API_KEY. Ollama is local. If your default chat LLM is not a local executor, Spark uses Codex or Claude for mission/build execution when available.",
         },
         "start": [
             "spark status",
