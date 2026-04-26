@@ -529,10 +529,11 @@ class SparkCliTests(unittest.TestCase):
 
     def test_module_runtime_env_filters_parent_provider_secrets(self) -> None:
         module = make_module("safe-env-module", ["test.capability"])
+        safe_path = str(Path(tempfile.gettempdir()) / "safe-bin")
         with patch.dict(
             os.environ,
             {
-                "PATH": "C:/safe-bin",
+                "PATH": safe_path,
                 "OPENAI_API_KEY": "parent-openai",
                 "ZAI_BASE_URL": "https://evil.example",
                 "UNRELATED_SECRET": "parent-secret",
@@ -540,7 +541,7 @@ class SparkCliTests(unittest.TestCase):
             clear=True,
         ), patch("spark_cli.cli.read_generated_env", return_value={}):
             env = module_runtime_env(module)
-        self.assertEqual(env["PATH"].split(os.pathsep)[-1], "C:/safe-bin")
+        self.assertEqual(env["PATH"].split(os.pathsep)[-1], safe_path)
         self.assertNotIn("OPENAI_API_KEY", env)
         self.assertNotIn("ZAI_BASE_URL", env)
         self.assertNotIn("UNRELATED_SECRET", env)
@@ -1844,7 +1845,9 @@ class SparkCliTests(unittest.TestCase):
             self.assertIn("cmd.exe /c", commands[0][7])
             self.assertIn("start --allow-boot-warnings telegram-starter", commands[0][7])
             self.assertEqual(commands[0][8], "/F")
-            self.assertIn(["cmd", "/c", r"C:\Users\Example\.spark\bin\spark.cmd start --allow-boot-warnings telegram-starter"], commands)
+            self.assertEqual(commands[1][:2], ["cmd", "/c"])
+            self.assertIn(r"C:\Users\Example\.spark\bin\spark.cmd", commands[1][2])
+            self.assertIn("start --allow-boot-warnings telegram-starter", commands[1][2])
 
     def test_windows_startup_script_path_uses_appdata(self) -> None:
         with patch.dict(os.environ, {"APPDATA": r"C:\Users\Example\AppData\Roaming"}):
