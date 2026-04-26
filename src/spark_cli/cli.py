@@ -5021,6 +5021,12 @@ def onboarding_guide_payload() -> dict[str, Any]:
             "Example: spark setup --profile qa-bot --bot-token @clipboard --admin-telegram-ids <YOUR_TELEGRAM_ID>",
             "Then run: spark start spark-telegram-bot --profile qa-bot",
         ],
+        "access_levels": [
+            {"level": "1", "name": "Chat", "use": "Conversation, memory, recall, and diagnostics only."},
+            {"level": "2", "name": "Builder", "use": "Default. Explicit /run and build requests can use Spawner missions."},
+            {"level": "3", "name": "Agent", "use": "Adds public web/GitHub research and repo inspection when asked."},
+            {"level": "4", "name": "Developer", "use": "Adds local workspace build missions. Destructive actions still need explicit approval."},
+        ],
         "telegram_commands": [
             { "command": "/start", "use": "Show the basic command surface." },
             { "command": "/myid", "use": "Show your numeric Telegram id for admin setup." },
@@ -5029,6 +5035,7 @@ def onboarding_guide_payload() -> dict[str, Any]:
             { "command": "/recall <query>", "use": "Search your Spark memory when available." },
             { "command": "/run <goal>", "use": "Create a Spawner mission from Telegram." },
             { "command": "/board", "use": "Show current mission board/status." },
+            { "command": "/access <1|2|3|4>", "use": "Choose how much tool access Spark has in this Telegram chat." },
             { "command": "/mission status <id>", "use": "Inspect a mission." },
             { "command": "normal message", "use": "Ask Spark to answer through the configured LLM provider." },
         ],
@@ -5091,7 +5098,12 @@ def cmd_guide(args: argparse.Namespace) -> int:
     for item in payload["multi_bot_profiles"]:
         print(f"   - {item}")
     print("")
-    print("6. How the modules work together")
+    print("6. Choose Spark access level")
+    for item in payload["access_levels"]:
+        print(f"   Level {item['level']} - {item['name']}: {item['use']}")
+    print("   Change it in Telegram with /access <1|2|3|4>.")
+    print("")
+    print("7. How the modules work together")
     for item in payload["starter_bundle"]:
         print(f"   {item['module']}: {item['role']}")
     print("")

@@ -1315,8 +1315,11 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("spark start telegram-starter", output)
         self.assertIn("Optional: run another Telegram bot", output)
         self.assertIn("spark start spark-telegram-bot --profile qa-bot", output)
+        self.assertIn("Choose Spark access level", output)
+        self.assertIn("Level 4 - Developer", output)
         self.assertIn("/diagnose", output)
         self.assertIn("/run <goal>", output)
+        self.assertIn("/access <1|2|3|4>", output)
         self.assertIn("spark secrets list", output)
 
     def test_guide_json_is_agent_readable(self) -> None:
@@ -1328,6 +1331,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("starter_bundle", payload)
         self.assertIn("telegram_commands", payload)
         self.assertIn("multi_bot_profiles", payload)
+        self.assertIn("access_levels", payload)
         self.assertIn("Windows PowerShell/CMD", payload["operating_systems"])
         self.assertEqual(
             [item["role"] for item in payload["setup"]["llm_roles"]],
