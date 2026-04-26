@@ -30,6 +30,7 @@ import tomllib
 
 CLI_MAX_SUPPORTED_SCHEMA = 1
 DPAPI_SECRET_PREFIX = "dpapi:v1:"
+PRIVATE_FILE_MODE = 0o600
 
 
 SPARK_HOME = Path(os.environ.get("SPARK_HOME", Path.home() / ".spark")).expanduser()
@@ -848,11 +849,30 @@ def collect_installer_integrity_payload(*, hosted: bool = False) -> dict[str, An
     }
 
 
-def save_json(path: Path, payload: Any) -> None:
+def atomic_write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-    temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
-    os.replace(temp_path, path)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{py_secrets.token_hex(4)}.tmp")
+    try:
+        temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        try:
+            os.chmod(temp_path, PRIVATE_FILE_MODE)
+        except OSError:
+            pass
+        os.replace(temp_path, path)
+        try:
+            os.chmod(path, PRIVATE_FILE_MODE)
+        except OSError:
+            pass
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+
+def save_json(path: Path, payload: Any) -> None:
+    atomic_write_json(path, payload)
 
 
 def load_module(path: Path) -> Module:

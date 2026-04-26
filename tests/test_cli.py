@@ -16,6 +16,7 @@ from unittest.mock import patch
 
 from spark_cli.cli import (
     append_process_log,
+    atomic_write_json,
     build_module_repair_hints,
     build_parser,
     build_status_repair_hints,
@@ -280,6 +281,26 @@ class SparkCliTests(unittest.TestCase):
             path = Path(tmp_dir) / "registry.json"
             path.write_text('\ufeff{"ok": true}', encoding="utf-8")
             self.assertEqual(load_json(path, {}), {"ok": True})
+
+    def test_atomic_write_json_writes_private_file(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "state.json"
+            atomic_write_json(path, {"ok": True})
+
+            self.assertEqual(load_json(path, {}), {"ok": True})
+            self.assertFalse(list(Path(tmp_dir).glob(".state.json.*.tmp")))
+            if os.name != "nt":
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+
+    def test_atomic_write_json_cleans_tmp_on_interrupt(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "state.json"
+            with patch("spark_cli.cli.os.replace", side_effect=KeyboardInterrupt):
+                with self.assertRaises(KeyboardInterrupt):
+                    atomic_write_json(path, {"ok": True})
+
+            self.assertFalse(path.exists())
+            self.assertFalse(list(Path(tmp_dir).glob(".state.json.*.tmp")))
 
     def test_telegram_profile_helpers_scope_only_bot_processes(self) -> None:
         self.assertEqual(normalize_telegram_profile(None), "default")
