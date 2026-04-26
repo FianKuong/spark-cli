@@ -111,6 +111,7 @@ from spark_cli.cli import (
     read_clipboard_text,
     read_secret_interactive,
     resolve_secret_input,
+    runtime_command_argv,
     runtime_version_satisfies,
     validate_capability_needs_for_install,
     validate_registry_definition,
@@ -3421,6 +3422,17 @@ class SparkCliTests(unittest.TestCase):
     def test_install_command_argv_rejects_shell_metacharacter_chains(self) -> None:
         with self.assertRaises(SystemExit):
             install_command_argv("python -m pip install -e . && node evil.js")
+
+    def test_runtime_command_argv_rejects_shell_metacharacter_chains(self) -> None:
+        with self.assertRaises(SystemExit):
+            runtime_command_argv("npm run health && node evil.js")
+
+    def test_runtime_command_argv_allowlists_runtime_tools(self) -> None:
+        self.assertEqual(runtime_command_argv("python -m spark_researcher.cli status")[:3], [str(Path(sys.executable)), "-m", "spark_researcher.cli"])
+        with patch("spark_cli.cli.shutil.which", return_value="C:/node/npm.CMD"):
+            self.assertEqual(runtime_command_argv("npm run health:runtime"), ["C:/node/npm.CMD", "run", "health:runtime"])
+        with self.assertRaises(SystemExit):
+            runtime_command_argv("cmd /c echo unsafe")
 
     def test_install_command_argv_allowlists_package_managers(self) -> None:
         with self.assertRaises(SystemExit):

@@ -3775,11 +3775,12 @@ def run_shell(
     env: dict[str, str] | None = None,
     timeout: int | None = None,
 ) -> subprocess.CompletedProcess[str]:
+    argv = runtime_command_argv(command)
     try:
         return subprocess.run(
-            command,
+            argv,
             cwd=str(cwd),
-            shell=True,
+            shell=False,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -3792,6 +3793,13 @@ def run_shell(
         stderr = error.stderr if isinstance(error.stderr, str) else ""
         stderr = (stderr + "\n" if stderr else "") + f"command timed out after {timeout}s"
         return subprocess.CompletedProcess(command, 124, stdout=stdout, stderr=stderr)
+    except OSError as error:
+        return subprocess.CompletedProcess(
+            command,
+            127,
+            stdout="",
+            stderr=f"Could not start runtime command `{command}`: {error.__class__.__name__}. Check that the required tool is installed and on PATH.",
+        )
 
 
 def command_with_managed_python(command: str) -> str:
@@ -3813,12 +3821,34 @@ def resolve_install_executable(name: str) -> str:
     )
 
 
-def install_command_argv(command: str) -> list[str]:
+def _command_parts(command: str, subject: str) -> list[str]:
     parts = shlex.split(command, posix=True)
     if not parts:
-        raise SystemExit("Install command cannot be empty.")
+        raise SystemExit(f"{subject} cannot be empty.")
     if any(part in {"&&", "||", ";", "|", ">", ">>", "<"} for part in parts):
-        raise SystemExit("Install commands must be a single argv command, not a shell command chain.")
+        raise SystemExit(f"{subject} must be a single argv command, not a shell command chain.")
+    return parts
+
+
+def runtime_command_argv(command: str) -> list[str]:
+    parts = _command_parts(command, "Runtime command")
+    executable = parts[0].lower()
+    if executable in {"python", "python3"}:
+        return [str(Path(sys.executable)), *parts[1:]]
+    if executable == "node":
+        return [resolve_install_executable("node"), *parts[1:]]
+    if executable == "npm":
+        return [resolve_install_executable("npm"), *parts[1:]]
+    if executable == "uv" and len(parts) >= 2 and parts[1] == "run":
+        return [resolve_install_executable("uv"), *parts[1:]]
+    raise SystemExit(
+        "Unsupported runtime command executable. Allowed runtime commands must start with "
+        "python, python3, node, npm, or uv run."
+    )
+
+
+def install_command_argv(command: str) -> list[str]:
+    parts = _command_parts(command, "Install command")
     executable = parts[0].lower()
     if executable in {"python", "python3"}:
         return [str(Path(sys.executable)), *parts[1:]]
@@ -5430,10 +5460,11 @@ def start_module(module: Module, *, allow_boot_warnings: bool = False, profile: 
         profile=profile,
     )
 
+    argv = runtime_command_argv(command)
     subprocess_env = module_runtime_env(module, profile)
     popen_kwargs: dict[str, Any] = {
         "cwd": str(module.path),
-        "shell": True,
+        "shell": False,
         "stderr": subprocess.STDOUT,
         "env": subprocess_env,
     }
@@ -5455,7 +5486,7 @@ def start_module(module: Module, *, allow_boot_warnings: bool = False, profile: 
         log_handle = log_path.open("a", encoding="utf-8")
         popen_kwargs["stdout"] = log_handle
         try:
-            process = subprocess.Popen(command, **popen_kwargs)
+            process = subprocess.Popen(argv, **popen_kwargs)
         finally:
             log_handle.close()
         pids[process_key] = {
