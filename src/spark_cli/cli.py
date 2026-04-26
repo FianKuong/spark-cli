@@ -361,7 +361,23 @@ class SetupBundlePlan:
 
 
 def load_registry_definition() -> dict[str, Any]:
-    return load_json(LOCAL_REGISTRY_PATH, {"modules": {}, "bundles": {}})
+    registry = load_json(LOCAL_REGISTRY_PATH, {"modules": {}, "bundles": {}})
+    validate_registry_definition(registry)
+    return registry
+
+
+def validate_registry_definition(registry: dict[str, Any]) -> None:
+    modules = registry.get("modules", {})
+    if not isinstance(modules, dict):
+        raise SystemExit("Registry `modules` must be an object.")
+    for name, metadata in modules.items():
+        if not isinstance(metadata, dict):
+            raise SystemExit(f"Registry entry `{name}` must be an object.")
+        source = str(metadata.get("source", "")).strip()
+        if not bool(metadata.get("blessed", False)) or not is_git_source(source):
+            continue
+        if not validate_commit_pin(str(metadata.get("commit", ""))):
+            raise SystemExit(f"Blessed git registry entry `{name}` must include a full commit pin.")
 
 
 def is_git_source(source: str) -> bool:

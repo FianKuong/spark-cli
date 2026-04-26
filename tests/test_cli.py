@@ -109,6 +109,7 @@ from spark_cli.cli import (
     resolve_secret_input,
     runtime_version_satisfies,
     validate_capability_needs_for_install,
+    validate_registry_definition,
     validate_manifest_schema,
     persist_keychain_secrets,
     split_secret_bindings,
@@ -1362,6 +1363,33 @@ class SparkCliTests(unittest.TestCase):
                 self.assertNotIn("github.com/spark/", source)
                 commit = str(registry["modules"][name].get("commit", ""))
                 self.assertEqual(validate_commit_pin(commit), commit)
+
+    def test_registry_validation_requires_blessed_git_commit_pins(self) -> None:
+        registry = {
+            "modules": {
+                "floating": {
+                    "source": "https://github.com/vibeforge1111/floating-module",
+                    "blessed": True,
+                }
+            },
+            "bundles": {},
+        }
+        with self.assertRaises(SystemExit) as error:
+            validate_registry_definition(registry)
+        self.assertIn("must include a full commit pin", str(error.exception))
+
+    def test_registry_validation_allows_unblessed_floating_git_sources(self) -> None:
+        validate_registry_definition(
+            {
+                "modules": {
+                    "community": {
+                        "source": "https://github.com/example/community-module",
+                        "blessed": False,
+                    }
+                },
+                "bundles": {},
+            }
+        )
 
     def test_autostart_install_defaults_to_telegram_starter_and_now_is_optional(self) -> None:
         args = build_parser().parse_args(["autostart", "install", "--now"])
