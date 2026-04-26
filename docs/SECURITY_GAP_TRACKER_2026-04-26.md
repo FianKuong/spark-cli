@@ -6,8 +6,8 @@ This tracker is the cross-repo source of truth for the April 26 hardening pass. 
 
 | Area | Status | Notes |
 | --- | --- | --- |
-| Rotated Telegram token history check | Verified | Custom Git history scan across `spark-cli`, `spark-intelligence-builder`, `spark-telegram-bot`, `domain-chip-memory`, `spark-researcher`, `spark-character`, and `spark-agent-site` found no rotated Telegram-token prefix hits. |
-| Rotated MiniMax key history check | Verified | Same history scan found no rotated MiniMax-key prefix hits. |
+| Rotated Telegram token history check | Verified | Custom Git history scan and gitleaks 8.30.1 scan across `spark-cli`, `spark-intelligence-builder`, `spark-telegram-bot`, `domain-chip-memory`, `spark-researcher`, `spark-character`, and `spark-agent-site` found no rotated Telegram-token prefix hits. |
+| Rotated MiniMax key history check | Verified | Custom Git history scan and gitleaks 8.30.1 found no rotated MiniMax-key prefix hits. |
 | Live `.env` / temp working files | Contained locally | Current-tree scan still sees local `.env`, `.env.override`, `.env.dspy.local`, and many Builder `.tmp-*` homes, but follow-up `git ls-files` and `git check-ignore` showed those paths are ignored rather than tracked. Do not print or commit their contents. |
 | History rewrite | Deferred | No `git filter-repo` rewrite is planned unless a real committed secret is found. Rewriting history and force-pushing remain destructive coordinated work requiring explicit approval. |
 | Blessed module commit pins | Done | `registry.json` blessed Git modules are pinned to full commits and registry validation refuses missing pins. |
@@ -36,12 +36,27 @@ Result:
 
 ## Remaining Work Queue
 
-1. Run an external secret scanner such as gitleaks or trufflehog against all Spark repos and archive the sanitized summary.
-2. Decide whether to delete local ignored Builder `.tmp-*` homes after exporting anything useful. This is a local destructive cleanup and should be explicit.
-3. Add real Sigstore or cosign attestation metadata to each blessed module once the report-only verifier has aged safely.
-4. Turn provenance enforcement on gradually: first fail only missing commit pins, then warn on unsigned commits, then require attestations for blessed modules.
-5. Add narrow endpoint regression tests whenever a new HTTP listener or public route is introduced.
-6. Design the approval engine for sensitive actions before touching runtime behavior.
+1. Decide whether to delete local ignored Builder `.tmp-*` homes after exporting anything useful. This is a local destructive cleanup and should be explicit.
+2. Add real Sigstore or cosign attestation metadata to each blessed module once the report-only verifier has aged safely.
+3. Turn provenance enforcement on gradually: first fail only missing commit pins, then warn on unsigned commits, then require attestations for blessed modules.
+4. Add narrow endpoint regression tests whenever a new HTTP listener or public route is introduced.
+5. Design the approval engine for sensitive actions before touching runtime behavior.
+
+## Gitleaks Scan - 2026-04-26
+
+Tool: gitleaks 8.30.1, downloaded locally into `C:\Users\USER\Desktop\spark-security-audit-reports`.
+
+| Repo | Initial result | Resolution |
+| --- | --- | --- |
+| `spark-cli` | 0 findings | Clean. |
+| `spark-intelligence-builder` | 4 findings | False positives from synthetic secret-boundary test vectors in `tests/test_builder_prelaunch_contracts.py`. Added a narrow `.gitleaks.toml` allowlist and split the current encoded JWT fixture; rerun was clean. |
+| `spark-telegram-bot` | 0 findings | Clean. |
+| `domain-chip-memory` | 4 findings | False positives from historical LongMemEval benchmark artifact text containing redacted placeholders and password-discussion examples. Added a narrow `.gitleaks.toml` allowlist for those ignored benchmark artifact paths; rerun was clean. |
+| `spark-researcher` | 0 findings | Clean. |
+| `spark-character` | 0 findings | Clean. |
+| `spark-agent-site` | 0 findings | Clean. |
+
+Conclusion: no evidence of the rotated Telegram bot token or rotated MiniMax key remains in scanned Git history. The only scanner findings were documented false positives, now handled by repo-local gitleaks configs. No history rewrite is justified by this scan.
 
 ## Destructive Actions Requiring Fresh Confirmation
 
