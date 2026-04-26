@@ -411,6 +411,9 @@ class SparkCliTests(unittest.TestCase):
         prompt = render_llm_doctor_prompt({"problem": "Telegram is quiet", "status": {"ok": False}})
         self.assertIn("Do not suggest raw provider API calls that require tokens", prompt)
         self.assertIn("Do not include local usernames", prompt)
+        self.assertIn("ask the user whether they want to prepare a sanitized upstream PR candidate", prompt)
+        self.assertIn("nothing will be uploaded automatically", prompt)
+        self.assertIn("Do you want me to prepare a sanitized upstream PR candidate", prompt)
         self.assertIn("spark fix telegram", prompt)
 
     def test_doctor_llm_parser_accepts_problem_and_prompt_out(self) -> None:

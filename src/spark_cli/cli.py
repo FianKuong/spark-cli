@@ -4149,7 +4149,8 @@ def render_llm_doctor_prompt(context: dict[str, Any]) -> str:
         "- Do not recommend publishing logs unless the user has reviewed them.\n"
         "- Do not include local usernames, private project paths, Telegram ids, chat transcripts, raw logs, or machine-specific secrets in an upstream PR.\n"
         "- Prefer reversible commands and explicit confirmation before destructive actions.\n"
-        "- If a fix could help upstream Spark, suggest creating a sanitized PR only after the local fix is understood.\n\n"
+        "- If a fix could help upstream Spark, ask the user whether they want to prepare a sanitized upstream PR candidate after the local fix is understood.\n"
+        "- The upstream question must be opt-in and must mention that nothing will be uploaded automatically.\n\n"
         "Engineering rules:\n"
         "- Think before coding: name assumptions and ask for missing information when needed.\n"
         "- Simplicity first: prefer the smallest repair that restores the user's system.\n"
@@ -4161,6 +4162,9 @@ def render_llm_doctor_prompt(context: dict[str, Any]) -> str:
         "3. Commands To Run\n"
         "4. Verification\n"
         "5. Upstream PR Candidate\n\n"
+        "In section 5, say either \"Not a good upstream PR candidate\" or ask exactly one permission-style question like: "
+        "\"Do you want me to prepare a sanitized upstream PR candidate so this can be fixed for other Spark users?\" "
+        "If yes, point them to `spark doctor llm <problem> --save-report --upstream-report`.\n\n"
         "Redacted local context JSON:\n"
         f"{json.dumps(context, indent=2, sort_keys=True)}\n"
     )
@@ -4365,6 +4369,7 @@ def cmd_doctor_llm(args: argparse.Namespace) -> int:
         "## Sharing Upstream\n"
         "This report is local. Do not paste it into a PR until you review it for private paths, project names, and sensitive context.\n"
         "If the fix is broadly useful, create a small PR with the code/test change, not raw logs or secrets.\n"
+        "Question: Do you want to prepare a sanitized upstream PR candidate so this can be fixed for other Spark users? If yes, rerun this command with `--upstream-report`. Spark will still only write a local draft for your review.\n"
     )
     if getattr(args, "save_report", False):
         path = write_doctor_report(report)
