@@ -606,6 +606,51 @@ def stdin_is_tty() -> bool:
         return False
 
 
+def stdout_is_tty() -> bool:
+    try:
+        return bool(sys.stdout.isatty())
+    except (AttributeError, ValueError):
+        return False
+
+
+def read_secret_interactive(prompt: str) -> str:
+    """Read a secret from an interactive terminal.
+
+    Windows users get one asterisk per typed/pasted character so they can tell
+    input landed without exposing the value. Other terminals fall back to the
+    standard hidden getpass prompt.
+    """
+    if sys.platform == "win32" and stdin_is_tty() and stdout_is_tty():
+        import msvcrt
+
+        chars: list[str] = []
+        sys.stdout.write(prompt)
+        sys.stdout.flush()
+        while True:
+            char = msvcrt.getwch()
+            if char in {"\r", "\n"}:
+                sys.stdout.write("\n")
+                sys.stdout.flush()
+                return "".join(chars)
+            if char == "\x03":
+                raise KeyboardInterrupt
+            if char == "\x1a":
+                raise EOFError
+            if char in {"\x00", "\xe0"}:
+                msvcrt.getwch()
+                continue
+            if char in {"\b", "\x7f"}:
+                if chars:
+                    chars.pop()
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+                continue
+            chars.append(char)
+            sys.stdout.write("*")
+            sys.stdout.flush()
+    return getpass.getpass(prompt)
+
+
 def setup_is_interactive(args: argparse.Namespace) -> bool:
     if getattr(args, "non_interactive", False):
         return False
@@ -866,7 +911,9 @@ def prompt_for_secret(secret_id: str, requirement: dict[str, Any]) -> str:
             print(f"  {secret_id} is required. Enter your numeric Telegram ID or cancel with Ctrl-C.")
     while True:
         try:
-            value = getpass.getpass(f"  {prompt_text}{suffix} (typing is hidden; type @clipboard to use copied value): ")
+            value = read_secret_interactive(
+                f"  {prompt_text}{suffix} (typing is masked; type @clipboard to use copied value): "
+            )
         except EOFError:
             return ""
         if value:
@@ -4829,7 +4876,7 @@ def cmd_secrets_set(args: argparse.Namespace) -> int:
     if args.value is not None:
         value = args.value
     elif stdin_is_tty():
-        value = getpass.getpass(f"  Paste value for {args.secret_id}: ")
+        value = read_secret_interactive(f"  Paste value for {args.secret_id} (typing is masked): ")
     else:
         value = sys.stdin.read().strip()
     if not value:

@@ -86,6 +86,7 @@ from spark_cli.cli import (
     parse_version_tuple,
     provider_status_payload,
     read_clipboard_text,
+    read_secret_interactive,
     resolve_secret_input,
     runtime_version_satisfies,
     validate_capability_needs_for_install,
@@ -2895,6 +2896,26 @@ class SparkCliTests(unittest.TestCase):
              patch("spark_cli.cli.read_clipboard_text", return_value="hidden-clip-secret"):
             value = prompt_for_secret("llm.zai.api_key", {"prompt": "Z.AI API key", "required": True})
         self.assertEqual(value, "hidden-clip-secret")
+
+    def test_read_secret_interactive_falls_back_to_hidden_getpass_when_masking_unavailable(self) -> None:
+        with patch("spark_cli.cli.stdin_is_tty", return_value=False), \
+             patch("spark_cli.cli.getpass.getpass", return_value="typed-secret") as getpass_mock:
+            value = read_secret_interactive("Paste secret: ")
+        self.assertEqual(value, "typed-secret")
+        getpass_mock.assert_called_once_with("Paste secret: ")
+
+    def test_read_secret_interactive_masks_windows_terminal_input(self) -> None:
+        chars = iter(["a", "b", "c", "\r"])
+        fake_msvcrt = type("FakeMsvcrt", (), {"getwch": staticmethod(lambda: next(chars))})
+        output = StringIO()
+        with patch("spark_cli.cli.sys.platform", "win32"), \
+             patch("spark_cli.cli.stdin_is_tty", return_value=True), \
+             patch("spark_cli.cli.stdout_is_tty", return_value=True), \
+             patch.dict(sys.modules, {"msvcrt": fake_msvcrt}), \
+             patch("sys.stdout", output):
+            value = read_secret_interactive("Paste secret: ")
+        self.assertEqual(value, "abc")
+        self.assertEqual(output.getvalue(), "Paste secret: ***\n")
 
     def test_prompt_for_secret_uses_visible_input_for_admin_ids(self) -> None:
         with patch("builtins.input", return_value="123,456"), \
