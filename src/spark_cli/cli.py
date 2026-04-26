@@ -2211,11 +2211,7 @@ def build_status_repair_hints(
         setup_secret_keys = set(setup_state.get("secret_keys", []))
         hints.extend(build_llm_repair_hints(llm_state, secret_keys=setup_secret_keys))
     if bundle_name:
-        expected_runtime_names = [
-            name
-            for name in ("spawner-ui", "spark-telegram-bot")
-            if name in installed_names
-        ]
+        expected_runtime_names = expected_runtime_process_names(installed_names, setup_state)
         if expected_runtime_names:
             process_ok, process_detail = process_runtime_detail(tracked_pids or {}, expected_runtime_names)
             if not process_ok:
@@ -3349,7 +3345,10 @@ def collect_verify_payload(*, deep: bool = False) -> dict[str, Any]:
         }
     )
 
-    process_ok, process_detail = process_runtime_detail(pids, ["spark-telegram-bot", "spawner-ui"])
+    process_ok, process_detail = process_runtime_detail(
+        pids,
+        expected_runtime_process_names(installed_names, setup_state if isinstance(setup_state, dict) else {}),
+    )
     checks.append(
         {
             "name": "runtime_processes",
@@ -3714,6 +3713,22 @@ def process_runtime_detail(pids: dict[str, Any], module_names: list[str]) -> tup
     if running_names:
         return False, "Missing Spark-supervised runtime process(es): " + ", ".join(missing) + f". Running: {', '.join(running_names)}."
     return False, "Missing Spark-supervised runtime process(es): " + ", ".join(missing) + "."
+
+
+def expected_runtime_process_names(installed_names: set[str], setup_state: dict[str, Any]) -> list[str]:
+    names = [
+        name
+        for name in ("spark-telegram-bot", "spawner-ui")
+        if name in installed_names
+    ]
+    profiles = setup_state.get("telegram_profiles") if isinstance(setup_state, dict) else None
+    if isinstance(profiles, dict) and "spark-telegram-bot" in installed_names:
+        for profile, profile_state in sorted(profiles.items()):
+            if isinstance(profile_state, dict):
+                process_key = module_process_key("spark-telegram-bot", str(profile))
+                if process_key not in names:
+                    names.append(process_key)
+    return names
 
 
 def telegram_profile_runtime_status(setup_state: dict[str, Any], pids: dict[str, Any]) -> list[dict[str, Any]]:

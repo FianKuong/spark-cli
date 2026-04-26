@@ -106,6 +106,7 @@ from spark_cli.cli import (
     detect_ingress_owner,
     execute_install_commands,
     expand_targets,
+    expected_runtime_process_names,
     generated_module_env_path,
     remove_managed_env_block,
     pid_is_running,
@@ -2405,6 +2406,14 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("spark-telegram-bot", detail)
         self.assertIn("spawner-ui (pid 102)", detail)
 
+    def test_expected_runtime_process_names_includes_telegram_profiles(self) -> None:
+        setup_state = {"telegram_profiles": {"spark-agi": {"relay_port": 8789}}}
+
+        self.assertEqual(
+            expected_runtime_process_names({"spark-telegram-bot", "spawner-ui"}, setup_state),
+            ["spark-telegram-bot", "spawner-ui", "spark-telegram-bot:spark-agi"],
+        )
+
     def test_tracked_process_keys_for_module_includes_profiled_bots(self) -> None:
         pids = {
             "spark-telegram-bot": {"pid": 101, "module": "spark-telegram-bot"},
@@ -3678,6 +3687,7 @@ class SparkCliTests(unittest.TestCase):
             "tracked_pids": {
                 "spark-telegram-bot": {"pid": 101},
                 "spawner-ui": {"pid": 102},
+                "spark-telegram-bot:spark-agi": {"pid": 103},
             },
             "repair_hints": [],
         }
@@ -3692,6 +3702,7 @@ class SparkCliTests(unittest.TestCase):
             "bundle": "telegram-starter",
             "secret_keys": ["telegram.bot_token", "telegram.admin_ids"],
             "builder_home": "C:/tmp/spark/state/spark-intelligence",
+            "telegram_profiles": {"spark-agi": {"relay_port": 8789}},
         }
         installed = {name: {"path": f"C:/tmp/spark/modules/{name}"} for name in expected}
 
@@ -3737,6 +3748,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertTrue(checks["builder_memory_bridge"]["ok"])
         self.assertTrue(checks["spawner_mission_relay"]["ok"])
         self.assertTrue(checks["runtime_processes"]["ok"])
+        self.assertIn("spark-telegram-bot:spark-agi", checks["runtime_processes"]["detail"])
 
     def test_collect_verify_payload_deep_runs_builder_memory_direct_smoke(self) -> None:
         expected = [
