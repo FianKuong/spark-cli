@@ -27,6 +27,7 @@ from spark_cli.cli import (
     collect_telegram_fix_payload,
     collect_verify_payload,
     configure_telegram_profile,
+    cmd_secrets_set,
     cmd_setup,
     cmd_update,
     console_safe_text,
@@ -2922,6 +2923,31 @@ class SparkCliTests(unittest.TestCase):
             value = read_secret_interactive("Paste secret: ")
         self.assertEqual(value, "abc")
         self.assertEqual(output.getvalue(), "Paste secret: ***\n")
+
+    def test_read_secret_interactive_handles_windows_backspace(self) -> None:
+        chars = iter(["a", "b", "\b", "c", "\r"])
+        fake_msvcrt = type("FakeMsvcrt", (), {"getwch": staticmethod(lambda: next(chars))})
+        output = StringIO()
+        with patch("spark_cli.cli.sys.platform", "win32"), \
+             patch("spark_cli.cli.stdin_is_tty", return_value=True), \
+             patch("spark_cli.cli.stdout_is_tty", return_value=True), \
+             patch.dict(sys.modules, {"msvcrt": fake_msvcrt}), \
+             patch("sys.stdout", output):
+            value = read_secret_interactive("Paste secret: ")
+        self.assertEqual(value, "ac")
+        self.assertEqual(output.getvalue(), "Paste secret: **\b \b*\n")
+
+    def test_cmd_secrets_set_resolves_clipboard_sentinel(self) -> None:
+        args = build_parser().parse_args(["secrets", "set", "llm.zai.api_key", "--value", "@clipboard", "--backend", "file"])
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            index_path = Path(tmp_dir) / "secrets_index.json"
+            file_path = Path(tmp_dir) / "secrets.local.json"
+            with patch("spark_cli.cli.SECRETS_INDEX_PATH", index_path), \
+                 patch("spark_cli.cli.SECRETS_FILE_PATH", file_path), \
+                 patch("spark_cli.cli.read_clipboard_text", return_value="clip-secret"), \
+                 patch("sys.stdout", new_callable=StringIO):
+                self.assertEqual(cmd_secrets_set(args), 0)
+            self.assertEqual(load_json(file_path, {})["llm.zai.api_key"], "clip-secret")
 
     def test_prompt_for_secret_uses_visible_input_for_admin_ids(self) -> None:
         with patch("builtins.input", return_value="123,456"), \

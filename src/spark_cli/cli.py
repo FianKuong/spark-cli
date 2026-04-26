@@ -4877,9 +4877,12 @@ def cmd_secrets_set(args: argparse.Namespace) -> int:
     if args.value is not None:
         value = args.value
     elif stdin_is_tty():
-        value = read_secret_interactive(f"  Paste value for {args.secret_id} (typing is masked): ")
+        value = read_secret_interactive(
+            f"  Paste value for {args.secret_id} (typing is masked; type @clipboard to use copied value): "
+        )
     else:
         value = sys.stdin.read().strip()
+    value = resolve_secret_input(value)
     if not value:
         raise SystemExit(f"Refusing to store empty value for {args.secret_id}.")
     backend = store_secret(args.secret_id, value, preferred=args.backend)
