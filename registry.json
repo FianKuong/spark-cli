@@ -9,7 +9,7 @@
     },
     "spark-character": {
       "source": "https://github.com/vibeforge1111/spark-character",
-      "commit": "d4c6c6debbc89501348f59e7a271e9e19f02b45b",
+      "commit": "341b3314c6b033b7f96fcbb42f76a2125d8be6a2",
       "require_signed_commit": false,
       "blessed": true,
       "summary": "Persona, voice consistency, scoring, and opt-in character evolution runtime for Spark"
