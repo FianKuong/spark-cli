@@ -7324,7 +7324,7 @@ def build_parser() -> argparse.ArgumentParser:
     live_start_parser = live_subparsers.add_parser("start", help="Start Spark Live")
     live_start_parser.set_defaults(func=cmd_live)
     live_run_parser = live_subparsers.add_parser("run", help="Start Spark Live and keep one combined log console open")
-    live_run_parser.add_argument("-n", "--lines", type=int, default=80)
+    live_run_parser.add_argument("-n", "--lines", type=int, default=80, help="Lines of history to show before following")
     live_run_parser.set_defaults(func=cmd_live)
     live_restart_parser = live_subparsers.add_parser("restart", help="Restart Spark Live")
     live_restart_parser.set_defaults(func=cmd_live)
