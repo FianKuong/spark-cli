@@ -35,6 +35,16 @@ def resolve_runtime_executable(name: str) -> str:
     )
 
 
+def npm_runtime_command_argv(args: list[str]) -> list[str]:
+    npm_path = Path(resolve_runtime_executable("npm"))
+    if os.name == "nt" and npm_path.suffix.lower() in {".cmd", ".bat"}:
+        node_path = shutil.which("node") or str(npm_path.with_name("node.exe"))
+        npm_cli = npm_path.parent / "node_modules" / "npm" / "bin" / "npm-cli.js"
+        if node_path and npm_cli.exists():
+            return [node_path, str(npm_cli), *args]
+    return [str(npm_path), *args]
+
+
 def runtime_command_argv(command: str) -> list[str]:
     parts = split_single_argv_command(command, "Runtime command")
     executable = parts[0].lower()
@@ -43,7 +53,7 @@ def runtime_command_argv(command: str) -> list[str]:
     if executable == "node":
         return [resolve_runtime_executable("node"), *parts[1:]]
     if executable == "npm":
-        return [resolve_runtime_executable("npm"), *parts[1:]]
+        return npm_runtime_command_argv(parts[1:])
     if executable == "uv" and len(parts) >= 2 and parts[1] == "run":
         return [resolve_runtime_executable("uv"), *parts[1:]]
     raise SystemExit(

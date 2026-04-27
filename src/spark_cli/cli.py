@@ -5701,6 +5701,53 @@ def wait_for_ready_check(
     return False, f"ready check did not pass within {timeout_seconds}s: {last_error}"
 
 
+def direct_node_package_script_argv(command: str, cwd: Path) -> list[str] | None:
+    parts = split_single_argv_command(command, "Runtime command")
+    if len(parts) < 3 or parts[0].lower() != "npm" or parts[1] != "run":
+        return None
+    script_name = parts[2]
+    remainder = parts[3:]
+    extra_args: list[str] = []
+    if remainder:
+        if remainder[0] != "--":
+            return None
+        extra_args = remainder[1:]
+
+    package_json = cwd / "package.json"
+    if not package_json.exists():
+        return None
+    try:
+        package_data = json.loads(package_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    scripts = package_data.get("scripts")
+    script = scripts.get(script_name) if isinstance(scripts, dict) else None
+    if not isinstance(script, str) or not script.strip():
+        return None
+    try:
+        script_parts = split_single_argv_command(script, "Package script")
+    except SystemExit:
+        return None
+    if not script_parts:
+        return None
+
+    node = resolve_runtime_binary("node")
+    if not node:
+        return None
+    script_executable = script_parts[0].lower()
+    if script_executable == "node":
+        return [node, *script_parts[1:], *extra_args]
+    if script_executable == "vite":
+        vite_bin = cwd / "node_modules" / "vite" / "bin" / "vite.js"
+        if vite_bin.exists():
+            return [node, str(vite_bin), *script_parts[1:], *extra_args]
+    if script_executable == "ts-node":
+        ts_node_bin = cwd / "node_modules" / "ts-node" / "dist" / "bin.js"
+        if ts_node_bin.exists():
+            return [node, str(ts_node_bin), *script_parts[1:], *extra_args]
+    return None
+
+
 def format_start_warning(module: Module, detail: str, process: subprocess.Popen[Any], profile: str | None = None) -> str:
     normalized = normalize_telegram_profile(profile)
     profile_hint = f" --profile {normalized}" if module.name == "spark-telegram-bot" and normalized != DEFAULT_TELEGRAM_PROFILE else ""
@@ -5870,8 +5917,8 @@ def start_module(module: Module, *, allow_boot_warnings: bool = False, profile: 
         profile=profile,
     )
 
-    argv = runtime_command_argv(command)
     subprocess_env = module_runtime_env(module, profile)
+    argv = direct_node_package_script_argv(command, module.path) or runtime_command_argv(command)
     popen_kwargs: dict[str, Any] = {
         "cwd": str(module.path),
         "shell": False,

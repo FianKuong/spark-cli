@@ -41,6 +41,7 @@ from spark_cli.cli import (
     console_safe_text,
     CONFIG_PATH,
     detect_runtime_binary,
+    direct_node_package_script_argv,
     DPAPI_SECRET_PREFIX,
     evaluate_module_health,
     clone_module_source,
@@ -3471,6 +3472,34 @@ class SparkCliTests(unittest.TestCase):
                 self.assertTrue(start_module(module, allow_boot_warnings=True))
             self.assertTrue(popen.call_args.kwargs["start_new_session"])
 
+    def test_direct_node_package_script_argv_resolves_vite_without_cmd_wrapper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            vite_bin = root / "node_modules" / "vite" / "bin" / "vite.js"
+            vite_bin.parent.mkdir(parents=True)
+            vite_bin.write_text("", encoding="utf-8")
+            (root / "package.json").write_text(json.dumps({"scripts": {"dev": "vite dev"}}), encoding="utf-8")
+
+            with patch("spark_cli.cli.resolve_runtime_binary", return_value="C:/node/node.exe"):
+                self.assertEqual(
+                    direct_node_package_script_argv("npm run dev -- --host 127.0.0.1", root),
+                    ["C:/node/node.exe", str(vite_bin), "dev", "--host", "127.0.0.1"],
+                )
+
+    def test_direct_node_package_script_argv_resolves_ts_node_without_cmd_wrapper(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            ts_node_bin = root / "node_modules" / "ts-node" / "dist" / "bin.js"
+            ts_node_bin.parent.mkdir(parents=True)
+            ts_node_bin.write_text("", encoding="utf-8")
+            (root / "package.json").write_text(json.dumps({"scripts": {"dev": "ts-node src/index.ts"}}), encoding="utf-8")
+
+            with patch("spark_cli.cli.resolve_runtime_binary", return_value="C:/node/node.exe"):
+                self.assertEqual(
+                    direct_node_package_script_argv("npm run dev", root),
+                    ["C:/node/node.exe", str(ts_node_bin), "src/index.ts"],
+                )
+
     def test_start_module_fails_boot_warning_when_process_exits(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             module = Module(
@@ -3713,9 +3742,29 @@ class SparkCliTests(unittest.TestCase):
     def test_runtime_command_argv_allowlists_runtime_tools(self) -> None:
         self.assertEqual(runtime_command_argv("python -m spark_researcher.cli status")[:3], [str(Path(sys.executable)), "-m", "spark_researcher.cli"])
         with patch("spark_cli.runtime_policy.shutil.which", return_value="C:/node/npm.CMD"):
-            self.assertEqual(runtime_command_argv("npm run health:runtime"), ["C:/node/npm.CMD", "run", "health:runtime"])
+            argv = runtime_command_argv("npm run health:runtime")
+            self.assertEqual(Path(argv[0]), Path("C:/node/npm.CMD"))
+            self.assertEqual(argv[1:], ["run", "health:runtime"])
         with self.assertRaises(SystemExit):
             runtime_command_argv("cmd /c echo unsafe")
+
+    def test_runtime_command_argv_avoids_npm_cmd_wrapper_on_windows(self) -> None:
+        if os.name != "nt":
+            self.skipTest("Windows npm .cmd wrapper behavior")
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            node_root = Path(tmp_dir)
+            npm_cmd = node_root / "npm.CMD"
+            npm_cli = node_root / "node_modules" / "npm" / "bin" / "npm-cli.js"
+            npm_cli.parent.mkdir(parents=True)
+            npm_cmd.write_text("", encoding="utf-8")
+            npm_cli.write_text("", encoding="utf-8")
+
+            with patch("spark_cli.runtime_policy.os.name", "nt"), \
+                 patch("spark_cli.runtime_policy.shutil.which", side_effect=lambda name: str(npm_cmd) if name == "npm" else "C:/node/node.exe"):
+                self.assertEqual(
+                    runtime_command_argv("npm run dev"),
+                    ["C:/node/node.exe", str(npm_cli), "run", "dev"],
+                )
 
     def test_install_command_argv_allowlists_package_managers(self) -> None:
         with self.assertRaises(SystemExit):
