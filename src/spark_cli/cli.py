@@ -5134,6 +5134,13 @@ def collect_verify_payload(*, deep: bool = False) -> dict[str, Any]:
     gateway_env = read_generated_env(MODULE_CONFIG_DIR / "spark-telegram-bot.env")
     builder_env = read_generated_env(MODULE_CONFIG_DIR / "spark-intelligence-builder.env")
     spawner_env = read_generated_env(MODULE_CONFIG_DIR / "spawner-ui.env")
+    spawner_runtime_env = dict(spawner_env)
+    spawner_path = installed_record_path(installed, "spawner-ui")
+    if spawner_path is not None and spawner_path.exists():
+        try:
+            spawner_runtime_env = module_runtime_env(load_module(spawner_path))
+        except (OSError, SystemExit, tomllib.TOMLDecodeError):
+            spawner_runtime_env = dict(spawner_env)
     pids = status_payload.get("tracked_pids") if isinstance(status_payload.get("tracked_pids"), dict) else {}
 
     def running(module_name: str) -> bool:
@@ -5256,7 +5263,7 @@ def collect_verify_payload(*, deep: bool = False) -> dict[str, Any]:
     )
     spawner_ok = (
         bool(spawner_env.get("MISSION_CONTROL_WEBHOOK_URLS"))
-        and bool(spawner_env.get("TELEGRAM_RELAY_SECRET"))
+        and bool(spawner_runtime_env.get("TELEGRAM_RELAY_SECRET"))
         and bool(mission_provider)
         and mission_provider not in {"none", "not_configured"}
     )

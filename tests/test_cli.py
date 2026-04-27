@@ -2075,7 +2075,7 @@ class SparkCliTests(unittest.TestCase):
                     "plane": "execution",
                     "capabilities": ["mission.execution"],
                     "needs_capabilities": [],
-                    "needs_secrets": [],
+                    "needs_secrets": ["telegram.relay_secret"],
                 },
                 "spark-telegram-bot": {
                     "kind": "service",
@@ -2252,7 +2252,7 @@ class SparkCliTests(unittest.TestCase):
             self.assertNotIn("SPARK_SPARK_LLM_PROVIDER", spawner_env)
             self.assertNotIn("SPARK_ZAI_API_KEY", spawner_env)
             self.assertIn("MISSION_CONTROL_WEBHOOK_URLS=http://127.0.0.1:8788/spawner-events", spawner_env)
-            self.assertIn("TELEGRAM_RELAY_SECRET=", spawner_env)
+            self.assertNotIn("TELEGRAM_RELAY_SECRET=", spawner_env)
             self.assertNotIn("TELEGRAM_RELAY_SECRET=", gateway_env)
             self.assertIn(f"SPARK_INTELLIGENCE_HOME={expected_builder_home}", builder_env)
             self.assertIn(f"SPARK_RESEARCHER_ROOT={fixture_root / 'spark-researcher'}", builder_env)
@@ -5290,7 +5290,6 @@ class SparkCliTests(unittest.TestCase):
             if Path(path).name == "spawner-ui.env":
                 return {
                     "MISSION_CONTROL_WEBHOOK_URLS": "http://127.0.0.1:8788/spawner-events",
-                    "TELEGRAM_RELAY_SECRET": "relay",
                     "DEFAULT_MISSION_PROVIDER": "codex",
                 }
             return {}
@@ -5299,6 +5298,9 @@ class SparkCliTests(unittest.TestCase):
             patch("spark_cli.cli.provider_status_payload", return_value=provider_payload), \
             patch("spark_cli.cli.load_json", side_effect=fake_load_json), \
             patch("spark_cli.cli.read_generated_env", side_effect=fake_read_generated_env), \
+            patch("spark_cli.cli.load_module", return_value=make_module("spawner-ui", ["mission.execution"], ["telegram.relay_secret"])), \
+            patch("spark_cli.cli.module_runtime_env", return_value={"TELEGRAM_RELAY_SECRET": "relay"}), \
+            patch("spark_cli.cli.Path.exists", return_value=True), \
             patch("spark_cli.cli.resolve_bundle_names", return_value=expected), \
             patch("spark_cli.cli.pid_is_running", return_value=True):
             payload = collect_verify_payload()
@@ -5543,7 +5545,6 @@ class SparkCliTests(unittest.TestCase):
             if Path(path).name == "spawner-ui.env":
                 return {
                     "MISSION_CONTROL_WEBHOOK_URLS": "http://127.0.0.1:8788/spawner-events",
-                    "TELEGRAM_RELAY_SECRET": "relay",
                     "SPARK_BOT_DEFAULT_PROVIDER": "zai",
                 }
             return {}
@@ -5552,6 +5553,9 @@ class SparkCliTests(unittest.TestCase):
             patch("spark_cli.cli.provider_status_payload", return_value=provider_payload), \
             patch("spark_cli.cli.load_json", side_effect=fake_load_json), \
             patch("spark_cli.cli.read_generated_env", side_effect=fake_read_generated_env), \
+            patch("spark_cli.cli.load_module", return_value=make_module("spawner-ui", ["mission.execution"], ["telegram.relay_secret"])), \
+            patch("spark_cli.cli.module_runtime_env", return_value={"TELEGRAM_RELAY_SECRET": "relay"}), \
+            patch("spark_cli.cli.Path.exists", return_value=True), \
             patch("spark_cli.cli.resolve_bundle_names", return_value=expected), \
             patch("spark_cli.cli.pid_is_running", return_value=True):
             payload = collect_verify_payload()
