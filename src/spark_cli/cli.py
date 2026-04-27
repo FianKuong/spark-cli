@@ -1711,6 +1711,9 @@ def write_boundary_env(base: dict[str, str]) -> dict[str, str]:
 
 def shell_command_env(*, filtered: bool = False) -> dict[str, str]:
     env = safe_parent_env() if filtered else os.environ.copy()
+    managed_node_dir = SPARK_HOME / "tools" / "node-v22.18.0-win-x64"
+    if os.name == "nt" and managed_node_dir.exists():
+        env["PATH"] = str(managed_node_dir) + os.pathsep + env.get("PATH", "")
     current_python = Path(sys.executable)
     python_path = str(current_python) if current_python.exists() else resolve_runtime_binary("python")
     if not python_path:

@@ -3472,6 +3472,19 @@ class SparkCliTests(unittest.TestCase):
                 self.assertTrue(start_module(module, allow_boot_warnings=True))
             self.assertTrue(popen.call_args.kwargs["start_new_session"])
 
+    def test_shell_command_env_prepends_managed_node_on_windows(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            spark_home = Path(tmp_dir) / ".spark"
+            managed_node = spark_home / "tools" / "node-v22.18.0-win-x64"
+            managed_node.mkdir(parents=True)
+            with patch("spark_cli.cli.os.name", "nt"), \
+                 patch("spark_cli.cli.SPARK_HOME", spark_home), \
+                 patch("spark_cli.cli.STATE_DIR", spark_home / "state"):
+                env = shell_command_env()
+
+        path_entries = env["PATH"].split(os.pathsep)
+        self.assertIn(str(managed_node), path_entries[:2])
+
     def test_direct_node_package_script_argv_resolves_vite_without_cmd_wrapper(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             root = Path(tmp_dir)
