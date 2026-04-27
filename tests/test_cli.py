@@ -2032,7 +2032,9 @@ class SparkCliTests(unittest.TestCase):
 
     def test_autostart_install_windows_falls_back_to_startup_folder_when_task_denied(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
-            startup_script = Path(tmp_dir) / "spark-telegram-agent.cmd"
+            startup_script = Path(tmp_dir) / "spark-telegram-agent.vbs"
+            legacy_script = Path(tmp_dir) / "spark-telegram-agent.cmd"
+            legacy_script.write_text("@echo off\r\nold visible launcher\r\n", encoding="ascii")
             commands: list[list[str]] = []
 
             def fake_helper(command: list[str]) -> subprocess.CompletedProcess[str]:
@@ -2044,6 +2046,7 @@ class SparkCliTests(unittest.TestCase):
             args = build_parser().parse_args(["autostart", "install", "--now"])
             with patch("spark_cli.cli.sys.platform", "win32"), \
                  patch("spark_cli.cli.windows_startup_script_path", return_value=startup_script), \
+                 patch("spark_cli.cli.windows_startup_legacy_cmd_path", return_value=legacy_script), \
                  patch("spark_cli.cli.spark_invocation_args", return_value=[r"C:\Users\Example\.spark\bin\spark.cmd"]), \
                  patch("spark_cli.cli.load_json", return_value={}), \
                  patch("spark_cli.cli.run_autostart_helper", side_effect=fake_helper), \
@@ -2051,6 +2054,8 @@ class SparkCliTests(unittest.TestCase):
                 self.assertEqual(args.func(args), 0)
 
             self.assertTrue(startup_script.exists())
+            self.assertFalse(legacy_script.exists())
+            self.assertIn("WScript.Shell", startup_script.read_text(encoding="ascii"))
             self.assertEqual(commands[0][:7], ["schtasks", "/Create", "/SC", "ONLOGON", "/TN", "Spark Telegram Agent", "/TR"])
             self.assertIn("cmd.exe /c", commands[0][7])
             self.assertIn("start --allow-boot-warnings telegram-starter", commands[0][7])
