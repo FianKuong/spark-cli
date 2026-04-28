@@ -2086,6 +2086,15 @@ LLM_PROVIDER_ENV: dict[str, dict[str, str]] = {
         "model_default": "google/gemma-4-26B-A4B-it:fastest",
         "bot_provider": "huggingface",
     },
+    "lmstudio": {
+        "base_url_arg": "lmstudio_base_url",
+        "base_url_env": "LMSTUDIO_BASE_URL",
+        "base_url_default": "http://localhost:1234/v1",
+        "model_arg": "lmstudio_model",
+        "model_env": "LMSTUDIO_MODEL",
+        "model_default": "local-model",
+        "bot_provider": "lmstudio",
+    },
     "zai": {
         "api_key_secret": "llm.zai.api_key",
         "api_key_env": "ZAI_API_KEY",
@@ -2155,7 +2164,7 @@ LLM_PROVIDER_ENV: dict[str, dict[str, str]] = {
 
 LLM_PROVIDER_CHOICES = sorted(provider for provider in LLM_PROVIDER_ENV if provider != "not_configured")
 LLM_ROLES = ("chat", "builder", "memory", "mission")
-LLM_PROVIDER_WIZARD_ORDER = ("openai", "codex", "anthropic", "openrouter", "zai", "minimax", "huggingface", "ollama")
+LLM_PROVIDER_WIZARD_ORDER = ("openai", "codex", "anthropic", "openrouter", "zai", "minimax", "huggingface", "lmstudio", "ollama")
 LLM_ROLE_LABELS = {
     "chat": "Telegram chat replies",
     "builder": "Builder reasoning",
@@ -2168,6 +2177,7 @@ LLM_PROVIDER_LABELS = {
     "anthropic": "Anthropic / Claude",
     "openrouter": "OpenRouter",
     "huggingface": "Hugging Face router",
+    "lmstudio": "LM Studio local",
     "zai": "Z.AI / GLM coding endpoint",
     "minimax": "MiniMax",
     "ollama": "Ollama local",
@@ -2178,6 +2188,7 @@ LLM_PROVIDER_AUTH_HINTS = {
     "anthropic": "Claude Code `claude -p` sign-in path or ANTHROPIC_API_KEY",
     "openrouter": "OPENROUTER_API_KEY",
     "huggingface": "HF_TOKEN",
+    "lmstudio": "local LM Studio server",
     "zai": "ZAI_API_KEY",
     "minimax": "MINIMAX_API_KEY",
     "ollama": "local Ollama server",
@@ -2200,6 +2211,8 @@ def describe_llm_provider_setup(provider: str) -> str:
         status = "unified OpenAI-compatible model gateway"
     elif provider == "huggingface":
         status = "Hugging Face OpenAI-compatible chat router"
+    elif provider == "lmstudio":
+        status = "local OpenAI-compatible server at http://localhost:1234/v1"
     elif provider == "zai":
         status = "uses the GLM coding endpoint API key"
     elif provider == "minimax":
@@ -2390,7 +2403,7 @@ def provider_auth_mode(provider: str, env: dict[str, str]) -> str:
         return "not_configured"
     if provider == "anthropic" and detect_claude_code()["present"]:
         return "claude_oauth"
-    if provider == "ollama":
+    if provider in {"lmstudio", "ollama"}:
         return "local"
     return "not_configured"
 
@@ -8032,6 +8045,8 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--huggingface-api-key", help="Hugging Face token, @clipboard, @env:NAME, or @file:path")
     setup_parser.add_argument("--huggingface-base-url", default="https://router.huggingface.co/v1")
     setup_parser.add_argument("--huggingface-model", default="google/gemma-4-26B-A4B-it:fastest")
+    setup_parser.add_argument("--lmstudio-base-url", default="http://localhost:1234/v1")
+    setup_parser.add_argument("--lmstudio-model", default="local-model")
     setup_parser.add_argument("--minimax-api-key", help="MiniMax API key, @clipboard, @env:NAME, or @file:path")
     setup_parser.add_argument("--minimax-base-url", default="https://api.minimax.io/v1")
     setup_parser.add_argument("--minimax-model", default="MiniMax-M2.7")

@@ -1670,6 +1670,27 @@ class SparkCliTests(unittest.TestCase):
             {"chat": "zai", "builder": "zai", "memory": "zai", "mission": "zai"},
         )
 
+    def test_build_llm_env_lmstudio_powers_agent_and_mission_by_default(self) -> None:
+        args = build_parser().parse_args(
+            [
+                "setup",
+                "--non-interactive",
+                "--llm-provider",
+                "lmstudio",
+                "--lmstudio-model",
+                "loaded-local-model",
+            ]
+        )
+        provider, env = build_llm_env(args, {})
+        self.assertEqual(provider, "lmstudio")
+        self.assertEqual(env["LMSTUDIO_BASE_URL"], "http://localhost:1234/v1")
+        self.assertEqual(env["LMSTUDIO_MODEL"], "loaded-local-model")
+        for role in ("CHAT", "BUILDER", "MEMORY", "MISSION"):
+            self.assertEqual(env[f"SPARK_{role}_LLM_PROVIDER"], "lmstudio")
+            self.assertEqual(env[f"SPARK_{role}_LLM_BOT_PROVIDER"], "lmstudio")
+            self.assertEqual(env[f"SPARK_{role}_LLM_MODEL"], "loaded-local-model")
+            self.assertEqual(env[f"SPARK_{role}_LLM_AUTH_MODE"], "local")
+
     def test_resolve_llm_roles_keeps_explicit_mission_provider(self) -> None:
         args = build_parser().parse_args(
             [
