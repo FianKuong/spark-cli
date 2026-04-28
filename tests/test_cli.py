@@ -121,6 +121,7 @@ from spark_cli.cli import (
     provider_status_payload,
     provider_recommendations_payload,
     provider_test_payload,
+    resolve_provider_test_target,
     redact_for_llm,
     redact_shareable_text,
     redact_sensitive_text,
@@ -635,6 +636,48 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(command[:3], ["claude", "-p", "--output-format"])
         self.assertIn("--model", command)
         self.assertIn("claude-sonnet-4.5", command)
+
+    def test_provider_test_explicit_codex_uses_codex_oauth_defaults(self) -> None:
+        setup_state = {
+            "llm": {
+                "provider": "zai",
+                "roles": {
+                    "chat": {
+                        "provider": "zai",
+                        "model": "glm-5.1",
+                        "auth_mode": "api_key",
+                    }
+                },
+            }
+        }
+        with patch("spark_cli.cli.load_json", return_value=setup_state), \
+             patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "codex"}):
+            target = resolve_provider_test_target("chat", "codex")
+        self.assertEqual(target["provider"], "codex")
+        self.assertEqual(target["auth_mode"], "codex_oauth")
+        self.assertEqual(target["model"], "gpt-5.5")
+        self.assertEqual(target["cli_path"], "codex")
+
+    def test_provider_test_explicit_anthropic_uses_claude_oauth_defaults(self) -> None:
+        setup_state = {
+            "llm": {
+                "provider": "zai",
+                "roles": {
+                    "chat": {
+                        "provider": "zai",
+                        "model": "glm-5.1",
+                        "auth_mode": "api_key",
+                    }
+                },
+            }
+        }
+        with patch("spark_cli.cli.load_json", return_value=setup_state), \
+             patch("spark_cli.cli.detect_claude_code", return_value={"present": True, "path": "claude"}):
+            target = resolve_provider_test_target("chat", "anthropic")
+        self.assertEqual(target["provider"], "anthropic")
+        self.assertEqual(target["auth_mode"], "claude_oauth")
+        self.assertEqual(target["model"], "claude-sonnet-4.5")
+        self.assertEqual(target["cli_path"], "claude")
 
     def test_new_user_experience_commands_parse(self) -> None:
         parser = build_parser()

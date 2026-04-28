@@ -5001,14 +5001,26 @@ def resolve_llm_doctor_target(args: argparse.Namespace) -> dict[str, Any]:
             continue
         seen.add(role)
         state = configured_llm_role_state(role)
-        provider = str(requested_provider or state.get("provider") or "not_configured")
+        state_provider = str(state.get("provider") or "not_configured")
+        provider = str(requested_provider or state_provider)
         if provider == "not_configured":
             continue
         spec = LLM_PROVIDER_ENV.get(provider)
         if not spec:
             continue
-        model = str(getattr(args, "model", None) or state.get("model") or spec.get("model_default") or "")
-        base_url = str(getattr(args, "base_url", None) or state.get("base_url") or spec.get("base_url_default") or "")
+        use_role_defaults = provider == state_provider
+        model = str(
+            getattr(args, "model", None)
+            or (state.get("model") if use_role_defaults else None)
+            or spec.get("model_default")
+            or ""
+        )
+        base_url = str(
+            getattr(args, "base_url", None)
+            or (state.get("base_url") if use_role_defaults else None)
+            or spec.get("base_url_default")
+            or ""
+        )
         auth_mode = str(state.get("auth_mode") or "not_configured")
         if provider in {"openai", "zai", "kimi", "minimax", "openrouter", "huggingface"}:
             secret_id = spec.get("api_key_secret")
@@ -5030,7 +5042,7 @@ def resolve_llm_doctor_target(args: argparse.Namespace) -> dict[str, Any]:
                 "base_url": base_url,
                 "auth_mode": "local",
             }
-        if provider in {"codex", "openai"} and auth_mode == "codex_oauth":
+        if provider == "codex" or (provider == "openai" and auth_mode == "codex_oauth"):
             codex = detect_codex_cli()
             if codex["present"]:
                 return {
@@ -5041,7 +5053,7 @@ def resolve_llm_doctor_target(args: argparse.Namespace) -> dict[str, Any]:
                     "auth_mode": "codex_oauth",
                     "cli_path": codex["path"],
                 }
-        if provider == "anthropic" and auth_mode == "claude_oauth":
+        if provider == "anthropic" and (requested_provider == "anthropic" or auth_mode == "claude_oauth"):
             claude = detect_claude_code()
             if claude["present"]:
                 return {
