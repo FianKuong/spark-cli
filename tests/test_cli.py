@@ -621,6 +621,63 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("llm_roles", names)
         self.assertIn("spark support bundle", payload["share_policy"])
 
+    def test_security_audit_flags_public_control_surface_without_keys(self) -> None:
+        def fake_read_generated_env(path: Path) -> dict[str, str]:
+            if Path(path).name == "spawner-ui.env":
+                return {"SPARK_SPAWNER_HOST": "0.0.0.0"}
+            if Path(path).name == "spark-telegram-bot.env":
+                return {"TELEGRAM_GATEWAY_MODE": "polling"}
+            return {}
+
+        with patch("spark_cli.cli.collect_secret_surface_payload", return_value={"ok": True, "detail": "clean"}), \
+             patch("spark_cli.cli.provider_status_payload", return_value={"ok": True, "summary": "providers ready"}), \
+             patch("spark_cli.cli.collect_status_payload", return_value={"ok": True, "repair_hints": []}), \
+             patch("spark_cli.cli.read_generated_env", side_effect=fake_read_generated_env), \
+             patch("spark_cli.cli.spark_home_boundary_errors", return_value=[]), \
+             patch("spark_cli.cli.spark_home_write_errors", return_value=[]), \
+             patch("spark_cli.cli.local_secret_file_permission_errors", return_value=[]), \
+             patch("spark_cli.cli.hosted_cloud_credential_env_errors", return_value=[]), \
+             patch("spark_cli.cli.telegram_polling_conflict_errors", return_value=[]), \
+             patch("spark_cli.cli.pid_registry_errors", return_value=[]):
+            payload = collect_security_audit_payload()
+
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertFalse(payload["ok"])
+        self.assertFalse(checks["control_surface"]["ok"])
+        self.assertIn("SPARK_ALLOWED_HOSTS", checks["control_surface"]["detail"])
+
+    def test_security_audit_can_include_hosted_checks(self) -> None:
+        hosted_payload = {
+            "ok": False,
+            "checks": [
+                {
+                    "name": "no_docker_socket",
+                    "ok": False,
+                    "required": True,
+                    "detail": "Docker socket is visible inside the container.",
+                    "repair": "Remove the socket mount.",
+                }
+            ],
+        }
+        with patch("spark_cli.cli.collect_secret_surface_payload", return_value={"ok": True, "detail": "clean"}), \
+             patch("spark_cli.cli.provider_status_payload", return_value={"ok": True, "summary": "providers ready"}), \
+             patch("spark_cli.cli.read_generated_env", return_value={"TELEGRAM_GATEWAY_MODE": "polling"}), \
+             patch("spark_cli.cli.collect_status_payload", return_value={"ok": True, "repair_hints": []}), \
+             patch("spark_cli.cli.spark_home_boundary_errors", return_value=[]), \
+             patch("spark_cli.cli.spark_home_write_errors", return_value=[]), \
+             patch("spark_cli.cli.local_secret_file_permission_errors", return_value=[]), \
+             patch("spark_cli.cli.hosted_cloud_credential_env_errors", return_value=[]), \
+             patch("spark_cli.cli.local_control_surface_errors", return_value=[]), \
+             patch("spark_cli.cli.telegram_polling_conflict_errors", return_value=[]), \
+             patch("spark_cli.cli.pid_registry_errors", return_value=[]), \
+             patch("spark_cli.cli.collect_hosted_security_payload", return_value=hosted_payload):
+            payload = collect_security_audit_payload(hosted=True)
+
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertFalse(payload["ok"])
+        self.assertFalse(checks["hosted_no_docker_socket"]["ok"])
+        self.assertEqual(checks["hosted_no_docker_socket"]["severity"], "high")
+
     def test_provider_test_uses_configured_target_and_redacts_failures(self) -> None:
         with patch("spark_cli.cli.resolve_provider_test_target", return_value={
             "provider": "zai",

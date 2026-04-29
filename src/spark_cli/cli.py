@@ -4853,59 +4853,266 @@ def redact_secret_surface_logs() -> dict[str, Any]:
     return {"changed": changed, "scanned_files": scanned}
 
 
-def collect_security_audit_payload(*, deep: bool = False) -> dict[str, Any]:
-    checks: list[dict[str, Any]] = []
-    secret_surface = collect_secret_surface_payload()
-    checks.append(
-        {
-            "name": "secret_surface",
-            "ok": bool(secret_surface.get("ok")),
-            "severity": "high" if not secret_surface.get("ok") else "info",
-            "detail": secret_surface.get("detail", ""),
-            "repair": "spark fix secrets --redact-logs",
-        }
+def security_check(
+    name: str,
+    ok: bool,
+    detail: str,
+    repair: str,
+    *,
+    severity: str = "info",
+) -> dict[str, Any]:
+    return {
+        "name": name,
+        "ok": bool(ok),
+        "severity": severity if not ok else "info",
+        "detail": detail,
+        "repair": repair,
+    }
+
+
+def spark_home_boundary_errors(spark_home: Path = SPARK_HOME) -> list[str]:
+    errors: list[str] = []
+    try:
+        resolved = spark_home.expanduser().resolve()
+    except OSError:
+        resolved = spark_home.expanduser().absolute()
+
+    unsafe: set[Path] = set()
+    if resolved.anchor:
+        unsafe.add(Path(resolved.anchor))
+    unsafe.add(Path.home().expanduser())
+    try:
+        unsafe = {path.resolve() for path in unsafe}
+    except OSError:
+        unsafe = {path.absolute() for path in unsafe}
+
+    if resolved in unsafe:
+        errors.append(f"SPARK_HOME points at a broad directory: {redact_shareable_text(str(resolved))}.")
+    if str(resolved).strip() in {"", ".", os.sep}:
+        errors.append("SPARK_HOME is empty or points at the filesystem root.")
+    return errors
+
+
+def spark_home_write_errors(paths: list[Path] | None = None) -> list[str]:
+    errors: list[str] = []
+    for path in paths or [SPARK_HOME, STATE_DIR, CONFIG_DIR, LOG_DIR]:
+        if path.exists() and not os.access(path, os.R_OK | os.W_OK):
+            errors.append(f"{redact_shareable_text(str(path))} is not readable/writable by the current user.")
+    return errors
+
+
+def local_secret_file_permission_errors(paths: list[Path] | None = None) -> list[str]:
+    if os.name == "nt":
+        return []
+    errors: list[str] = []
+    for path in paths or [SECRETS_FILE_PATH, SECRETS_INDEX_PATH]:
+        try:
+            mode = path.stat().st_mode & 0o777
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            errors.append(f"Could not inspect {redact_shareable_text(str(path))}: {exc}.")
+            continue
+        if mode & 0o077:
+            errors.append(f"{redact_shareable_text(str(path))} is {oct(mode)}; Spark secrets should be private.")
+    return errors
+
+
+def local_control_surface_errors() -> list[str]:
+    errors: list[str] = []
+    spawner_env = read_generated_env(MODULE_CONFIG_DIR / "spawner-ui.env")
+    spawner_host = (spawner_env.get("SPARK_SPAWNER_HOST") or spawner_env.get("HOST") or "").strip()
+    allowed_hosts = [host.strip() for host in (spawner_env.get("SPARK_ALLOWED_HOSTS") or "").split(",") if host.strip()]
+    public_bind = spawner_host in {"0.0.0.0", "::"} or bool(allowed_hosts)
+    if public_bind:
+        errors.extend(hosted_allowed_host_errors(allowed_hosts))
+        if not allowed_hosts:
+            errors.append("Spawner appears publicly bound but SPARK_ALLOWED_HOSTS is not configured.")
+        ui_key = spawner_env.get("SPARK_UI_API_KEY") or os.environ.get("SPARK_UI_API_KEY") or ""
+        bridge_key = spawner_env.get("SPARK_BRIDGE_API_KEY") or os.environ.get("SPARK_BRIDGE_API_KEY") or ""
+        errors.extend(hosted_api_key_strength_errors(ui_key, bridge_key))
+    return errors
+
+
+def telegram_polling_conflict_errors() -> list[str]:
+    errors: list[str] = []
+    setup_state = load_json(CONFIG_PATH, {})
+    profiles = configured_telegram_profiles() or [DEFAULT_TELEGRAM_PROFILE]
+    token_profiles: dict[str, list[str]] = {}
+
+    for profile in profiles:
+        token = fetch_secret(telegram_profile_secret_id(profile, "bot_token"))
+        if token:
+            token_profiles.setdefault(token, []).append(profile)
+        log_text = "".join(tail_log_lines(module_log_path("spark-telegram-bot", profile), 200))
+        if "409: Conflict" in log_text and "getUpdates" in log_text:
+            errors.append(
+                f"Telegram profile `{profile}` log shows a getUpdates conflict; another process is polling the same bot token."
+            )
+
+    legacy_token = fetch_secret("telegram.bot_token")
+    primary_profile = primary_telegram_profile(setup_state if isinstance(setup_state, dict) else {})
+    primary_token = fetch_secret(telegram_profile_secret_id(primary_profile, "bot_token"))
+    if legacy_token and legacy_token != primary_token:
+        token_profiles.setdefault(legacy_token, []).append("legacy-default")
+
+    for profile_names in token_profiles.values():
+        unique_profiles = sorted(set(profile_names))
+        if len(unique_profiles) > 1:
+            errors.append(f"Telegram profiles share one bot token: {', '.join(unique_profiles)}.")
+    return errors
+
+
+def pid_registry_errors() -> list[str]:
+    errors: list[str] = []
+    for key, record in load_pids().items():
+        if not isinstance(record, dict):
+            errors.append(f"Process registry entry `{key}` is malformed.")
+            continue
+        try:
+            pid = int(record.get("pid", 0))
+        except (TypeError, ValueError):
+            errors.append(f"Process registry entry `{key}` has an invalid pid.")
+            continue
+        if pid and not pid_is_running(pid):
+            errors.append(f"Process registry entry `{key}` points at a stale pid ({pid}).")
+    return errors
+
+
+def running_as_hosted_context() -> bool:
+    return bool(
+        os.environ.get("SPARK_LIVE_CONTAINER")
+        or os.environ.get("RAILWAY_ENVIRONMENT")
+        or os.environ.get("SPARK_ALLOWED_HOSTS")
     )
 
+
+def collect_security_audit_payload(*, deep: bool = False, hosted: bool = False) -> dict[str, Any]:
+    checks: list[dict[str, Any]] = []
+    secret_surface = collect_secret_surface_payload()
+    checks.append(security_check(
+        "secret_surface",
+        bool(secret_surface.get("ok")),
+        str(secret_surface.get("detail", "")),
+        "spark fix secrets --redact-logs",
+        severity="high",
+    ))
+
+    home_errors = spark_home_boundary_errors()
+    checks.append(security_check(
+        "spark_home_boundary",
+        not home_errors,
+        "SPARK_HOME is scoped to Spark-owned state." if not home_errors else "; ".join(home_errors),
+        "Set SPARK_HOME to a dedicated Spark directory, normally ~/.spark or /data/spark.",
+        severity="high",
+    ))
+
+    write_errors = spark_home_write_errors()
+    checks.append(security_check(
+        "spark_home_writable",
+        not write_errors,
+        "Spark-owned state directories are readable/writable." if not write_errors else "; ".join(write_errors),
+        "Repair ownership/permissions for the Spark home, then rerun spark security audit.",
+        severity="medium",
+    ))
+
+    permission_errors = local_secret_file_permission_errors()
+    checks.append(security_check(
+        "secret_file_permissions",
+        not permission_errors,
+        (
+            "Local secret file permissions are private or handled by the OS keychain."
+            if not permission_errors
+            else "; ".join(permission_errors)
+        ),
+        "Run `spark setup` or `chmod 600 ~/.spark/config/secrets.local.json ~/.spark/config/secrets_index.json`.",
+        severity="high",
+    ))
+
+    cloud_errors = hosted_cloud_credential_env_errors()
+    checks.append(security_check(
+        "ambient_cloud_credentials",
+        not cloud_errors,
+        "No cloud/admin deployment tokens are visible in this Spark process." if not cloud_errors else "; ".join(cloud_errors),
+        "Remove cloud deployment credentials from the Spark runtime environment unless explicitly needed.",
+        severity="high",
+    ))
+
+    control_errors = local_control_surface_errors()
+    checks.append(security_check(
+        "control_surface",
+        not control_errors,
+        "Spawner control surface is local-only or protected." if not control_errors else "; ".join(control_errors),
+        "Bind Spawner to localhost, or configure exact SPARK_ALLOWED_HOSTS plus strong SPARK_UI_API_KEY/SPARK_BRIDGE_API_KEY.",
+        severity="high",
+    ))
+
+    telegram_errors = telegram_polling_conflict_errors()
+    checks.append(security_check(
+        "telegram_polling",
+        not telegram_errors,
+        "No Telegram long-polling conflicts or reused profile tokens detected." if not telegram_errors else "; ".join(telegram_errors),
+        "Use one bot token per running profile; stop duplicate pollers or rotate the affected BotFather token.",
+        severity="high",
+    ))
+
+    pid_errors = pid_registry_errors()
+    checks.append(security_check(
+        "process_registry",
+        not pid_errors,
+        "Spark process registry has no malformed or stale entries." if not pid_errors else "; ".join(pid_errors[:5]),
+        "Run `spark live restart`, or `spark stop telegram-starter` then `spark live start` to refresh supervised pids.",
+        severity="medium",
+    ))
+
     provider_payload = provider_status_payload()
-    checks.append(
-        {
-            "name": "llm_roles",
-            "ok": bool(provider_payload.get("ok")),
-            "severity": "medium" if not provider_payload.get("ok") else "info",
-            "detail": provider_payload.get("summary", ""),
-            "repair": "spark providers status",
-        }
-    )
+    checks.append(security_check(
+        "llm_roles",
+        bool(provider_payload.get("ok")),
+        str(provider_payload.get("summary", "")),
+        "spark providers status",
+        severity="medium",
+    ))
 
     generated_env = read_generated_env(MODULE_CONFIG_DIR / "spark-telegram-bot.env")
     gateway_mode = generated_env.get("TELEGRAM_GATEWAY_MODE", "polling")
-    checks.append(
-        {
-            "name": "telegram_ingress_mode",
-            "ok": gateway_mode == "polling",
-            "severity": "high" if gateway_mode != "polling" else "info",
-            "detail": (
-                "Telegram is using long polling."
-                if gateway_mode == "polling"
-                else f"Telegram gateway mode is {gateway_mode}; launch profile should stay on long polling for this release."
-            ),
-            "repair": "spark setup --resume",
-        }
-    )
+    checks.append(security_check(
+        "telegram_ingress_mode",
+        gateway_mode == "polling",
+        (
+            "Telegram is using long polling."
+            if gateway_mode == "polling"
+            else f"Telegram gateway mode is {gateway_mode}; launch profile should stay on long polling for this release."
+        ),
+        "spark setup --resume",
+        severity="high",
+    ))
 
     status_payload = collect_status_payload()
     repair_hints = status_payload.get("repair_hints") if isinstance(status_payload, dict) else []
-    checks.append(
-        {
-            "name": "runtime_health",
-            "ok": bool(status_payload.get("ok")) if isinstance(status_payload, dict) else False,
-            "severity": "medium" if repair_hints else "info",
-            "detail": "Spark runtime health is clean." if not repair_hints else "; ".join(str(item) for item in repair_hints[:3]),
-            "repair": "spark live status",
-        }
-    )
+    checks.append(security_check(
+        "runtime_health",
+        bool(status_payload.get("ok")) if isinstance(status_payload, dict) else False,
+        "Spark runtime health is clean." if not repair_hints else "; ".join(str(item) for item in repair_hints[:3]),
+        "spark live status",
+        severity="medium",
+    ))
 
-    if deep:
+    should_include_hosted = hosted or running_as_hosted_context()
+    if should_include_hosted:
+        hosted_payload = collect_hosted_security_payload(deep=deep)
+        for check in hosted_payload.get("checks", []):
+            if not isinstance(check, dict):
+                continue
+            checks.append(security_check(
+                f"hosted_{check.get('name', 'unknown')}",
+                bool(check.get("ok")),
+                str(check.get("detail") or ""),
+                str(check.get("repair") or "spark live verify"),
+                severity="high" if check.get("required", True) else "medium",
+            ))
+
+    if deep and not should_include_hosted:
         checks.append(
             {
                 "name": "deep_verify",
@@ -4929,7 +5136,7 @@ def collect_security_audit_payload(*, deep: bool = False) -> dict[str, Any]:
 def cmd_security(args: argparse.Namespace) -> int:
     if args.security_command != "audit":
         raise SystemExit(f"Unknown security command: {args.security_command}")
-    payload = collect_security_audit_payload(deep=args.deep)
+    payload = collect_security_audit_payload(deep=args.deep, hosted=getattr(args, "hosted", False))
     if args.json:
         print(json.dumps(payload, indent=2))
         return 0 if payload.get("ok") else 1
@@ -6720,6 +6927,8 @@ def collect_hosted_security_payload(*, deep: bool = False) -> dict[str, Any]:
         else (
             f"Spark runtime is not root (uid={uid})."
             if uid is not None and uid != 0
+            else "This platform does not expose a Unix uid; non-root runtime is checked inside Linux/Docker hosted environments."
+            if uid is None
             else "Spark runtime appears to be running as root; hosted containers should drop to the spark user after volume prep."
         )
     )
@@ -6784,7 +6993,7 @@ def collect_hosted_security_payload(*, deep: bool = False) -> dict[str, Any]:
                 else (
                     f"Spawner public host allowlist: {', '.join(allowed_hosts)}."
                     if allowed_hosts
-                    else "Spawner is publicly bound but SPARK_ALLOWED_HOSTS is not configured."
+                    else "Spawner is not publicly bound, so SPARK_ALLOWED_HOSTS is not required for this context."
                 )
             ),
             "repair": "Set SPARK_ALLOWED_HOSTS to the exact hosted domain, with no scheme, path, wildcard, or loopback host.",
@@ -6799,6 +7008,8 @@ def collect_hosted_security_payload(*, deep: bool = False) -> dict[str, Any]:
                 else (
                 "Hosted UI and bridge API keys are configured; Spark Live maps the bridge key to control/event routes at startup."
                     if bool(bridge_key) and bool(ui_key)
+                    else "Spawner is not publicly bound, so hosted UI/bridge API keys are not required for this context."
+                    if not public_bind
                     else "Hosted/public Spawner needs SPARK_UI_API_KEY plus SPARK_BRIDGE_API_KEY."
                 )
             ),
@@ -9104,6 +9315,7 @@ def build_parser() -> argparse.ArgumentParser:
     security_subparsers = security_parser.add_subparsers(dest="security_command", required=True)
     security_audit_parser = security_subparsers.add_parser("audit", help="Check secrets, provider wiring, ingress mode, and runtime health")
     security_audit_parser.add_argument("--deep", action="store_true", help="Include deep verification checks")
+    security_audit_parser.add_argument("--hosted", action="store_true", help="Include Docker/Railway hosted security checks")
     security_audit_parser.add_argument("--json", action="store_true")
     security_audit_parser.set_defaults(func=cmd_security)
 
