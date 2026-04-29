@@ -6422,7 +6422,6 @@ def docker_socket_present() -> bool:
 
 
 HOSTED_SENSITIVE_MOUNTPOINTS = {
-    "/",
     "/root",
     "/home/spark/.ssh",
     "/home/spark/.aws",
