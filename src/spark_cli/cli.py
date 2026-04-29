@@ -5,6 +5,7 @@ import base64
 import ctypes
 import getpass
 import hashlib
+import ipaddress
 import json
 import os
 import plistlib
@@ -5011,6 +5012,174 @@ def security_provider_detail(provider_payload: dict[str, Any]) -> str:
     return "; ".join(parts)
 
 
+def git_short_status(path: Path) -> str:
+    result = subprocess.run(
+        git_command("-C", str(path), "status", "--porcelain"),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    return result.stdout.strip() if result.returncode == 0 else ""
+
+
+def git_current_head(path: Path) -> str | None:
+    result = subprocess.run(
+        git_command("-C", str(path), "rev-parse", "HEAD"),
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    if result.returncode != 0:
+        return None
+    value = result.stdout.strip().lower()
+    return value if validate_commit_pin(value) else None
+
+
+def module_supply_chain_errors() -> list[str]:
+    installed = load_json(REGISTRY_PATH, {})
+    registry_modules = load_registry_definition().get("modules", {})
+    if not isinstance(installed, dict) or not installed:
+        return ["No installed module registry was found; run `spark setup` before launch."]
+    if not isinstance(registry_modules, dict):
+        registry_modules = {}
+
+    errors: list[str] = []
+    modules_root = SPARK_HOME / "modules"
+    for name, record in sorted(installed.items()):
+        if not isinstance(record, dict):
+            errors.append(f"Installed module `{name}` has a malformed registry record.")
+            continue
+        path = Path(str(record.get("path") or "")).expanduser()
+        if not path.exists():
+            errors.append(f"Installed module `{name}` path is missing: {redact_shareable_text(str(path))}.")
+            continue
+        try:
+            if not path.resolve().is_relative_to(modules_root.resolve()):
+                errors.append(f"Installed module `{name}` lives outside Spark's managed module directory.")
+        except AttributeError:  # pragma: no cover - Python <3.9 fallback
+            if str(modules_root.resolve()) not in str(path.resolve()):
+                errors.append(f"Installed module `{name}` lives outside Spark's managed module directory.")
+        except OSError:
+            errors.append(f"Could not resolve installed module path for `{name}`.")
+
+        metadata = registry_modules.get(str(name))
+        if not isinstance(metadata, dict):
+            errors.append(f"Installed module `{name}` is not present in the blessed registry.")
+            continue
+        if not bool(metadata.get("blessed", False)):
+            errors.append(f"Installed module `{name}` is not marked blessed in the registry.")
+
+        pinned = str(metadata.get("commit") or "").strip().lower()
+        if not pinned:
+            errors.append(f"Blessed module `{name}` does not have a full registry commit pin.")
+        elif (path / ".git").exists():
+            current = git_current_head(path)
+            if current is None:
+                errors.append(f"Could not read git HEAD for installed module `{name}`.")
+            elif current != pinned:
+                errors.append(f"Installed module `{name}` is at {current[:12]}, not pinned {pinned[:12]}.")
+            if git_short_status(path):
+                errors.append(f"Installed module `{name}` has local git changes.")
+        else:
+            errors.append(f"Installed module `{name}` is not a git checkout, so commit provenance cannot be verified.")
+    return errors
+
+
+def dependency_lockfile_errors() -> list[str]:
+    installed = load_json(REGISTRY_PATH, {})
+    errors: list[str] = []
+    if not isinstance(installed, dict):
+        return errors
+    for name, record in sorted(installed.items()):
+        if not isinstance(record, dict):
+            continue
+        path = Path(str(record.get("path") or "")).expanduser()
+        if not path.exists():
+            continue
+        if (path / "package.json").exists() and not any(
+            (path / lockfile).exists()
+            for lockfile in ("package-lock.json", "npm-shrinkwrap.json", "pnpm-lock.yaml", "yarn.lock", "bun.lockb", "bun.lock")
+        ):
+            errors.append(f"Node module `{name}` has package.json but no dependency lockfile.")
+        if (path / "pyproject.toml").exists() and not any(
+            (path / lockfile).exists()
+            for lockfile in ("uv.lock", "poetry.lock", "pdm.lock", "requirements.lock", "requirements.txt")
+        ):
+            errors.append(f"Python module `{name}` has pyproject.toml but no dependency lock/requirements file.")
+    return errors
+
+
+UNSAFE_ENDPOINT_HOSTS = {
+    "0.0.0.0",
+    "::",
+    "metadata.google.internal",
+}
+
+
+def endpoint_security_errors() -> list[str]:
+    errors: list[str] = []
+    provider_payload = provider_status_payload()
+    urls: list[tuple[str, str]] = []
+    roles = provider_payload.get("roles")
+    if isinstance(roles, dict):
+        for role, role_payload in roles.items():
+            if isinstance(role_payload, dict) and role_payload.get("base_url"):
+                urls.append((f"llm role {role}", str(role_payload["base_url"])))
+
+    for env_name in ("spawner-ui.env", "spark-telegram-bot.env", "spark-intelligence-builder.env"):
+        env_values = read_generated_env(MODULE_CONFIG_DIR / env_name)
+        for key, value in env_values.items():
+            if ("URL" in key or key.endswith("_HOST")) and value:
+                for raw_url in str(value).split(","):
+                    urls.append((f"{env_name}:{key}", raw_url.strip()))
+
+    for label, raw_url in urls:
+        if not raw_url or raw_url.startswith("${"):
+            continue
+        parsed = urllib.parse.urlparse(raw_url if "://" in raw_url else f"http://{raw_url}")
+        if parsed.scheme not in {"http", "https"}:
+            errors.append(f"{label} uses unsupported URL scheme `{parsed.scheme}`.")
+            continue
+        host = (parsed.hostname or "").strip().lower()
+        if not host:
+            errors.append(f"{label} has a URL without a hostname.")
+            continue
+        if host in UNSAFE_ENDPOINT_HOSTS:
+            errors.append(f"{label} points at unsafe host `{host}`.")
+        try:
+            ip = ipaddress.ip_address(host.strip("[]"))
+        except ValueError:
+            ip = None
+        if ip is not None and (ip.is_unspecified or ip.is_multicast or ip.is_link_local):
+            errors.append(f"{label} points at unsafe network address `{host}`.")
+        if host == "169.254.169.254":
+            errors.append(f"{label} points at cloud metadata service address 169.254.169.254.")
+        if host not in {"localhost", "127.0.0.1", "::1"} and parsed.scheme != "https":
+            errors.append(f"{label} uses non-HTTPS remote endpoint `{raw_url}`.")
+    return errors
+
+
+def agency_guardrail_errors() -> list[str]:
+    errors: list[str] = []
+    if str(os.environ.get("SPARK_ALLOW_HOSTED_FULL_ACCESS") or "").strip().lower() in {"1", "true", "yes", "on"}:
+        errors.append("SPARK_ALLOW_HOSTED_FULL_ACCESS is enabled; hosted full access should stay off unless privately approval-gated.")
+    return errors
+
+
+def audit_visibility_errors() -> list[str]:
+    errors: list[str] = []
+    if not LOG_DIR.exists():
+        return ["Spark log directory does not exist yet."]
+    pids = load_pids()
+    for key, record in sorted(pids.items()):
+        if not isinstance(record, dict):
+            continue
+        raw_log_path = str(record.get("log_path") or "").strip()
+        if raw_log_path and not Path(raw_log_path).exists():
+            errors.append(f"Tracked process `{key}` points at missing log file.")
+    return errors
+
+
 def collect_security_audit_payload(*, deep: bool = False, hosted: bool = False) -> dict[str, Any]:
     checks: list[dict[str, Any]] = []
     secret_surface = collect_secret_surface_payload()
@@ -5086,6 +5255,51 @@ def collect_security_audit_payload(*, deep: bool = False, hosted: bool = False) 
         not pid_errors,
         "Spark process registry has no malformed or stale entries." if not pid_errors else "; ".join(pid_errors[:5]),
         "Run `spark live restart`, or `spark stop telegram-starter` then `spark live start` to refresh supervised pids.",
+        severity="medium",
+    ))
+
+    supply_chain_errors = module_supply_chain_errors()
+    checks.append(security_check(
+        "module_supply_chain",
+        not supply_chain_errors,
+        "Installed modules match blessed registry pins and provenance boundaries." if not supply_chain_errors else "; ".join(supply_chain_errors[:6]),
+        "Run `spark update --skip-dirty`, review local module edits, or reinstall the affected module from the blessed registry pin.",
+        severity="high",
+    ))
+
+    lockfile_errors = dependency_lockfile_errors()
+    checks.append(security_check(
+        "dependency_lockfiles",
+        not lockfile_errors,
+        "Installed modules have dependency lockfiles or requirements where expected." if not lockfile_errors else "; ".join(lockfile_errors[:6]),
+        "Add lockfiles/requirements for affected modules before publishing or pinning a release.",
+        severity="medium",
+    ))
+
+    endpoint_errors = endpoint_security_errors()
+    checks.append(security_check(
+        "endpoint_safety",
+        not endpoint_errors,
+        "Provider and bridge endpoints avoid obvious SSRF/misrouting hazards." if not endpoint_errors else "; ".join(endpoint_errors[:6]),
+        "Use HTTPS for remote providers, localhost for local-only services, and never point providers at metadata or wildcard addresses.",
+        severity="high",
+    ))
+
+    agency_errors = agency_guardrail_errors()
+    checks.append(security_check(
+        "agency_guardrails",
+        not agency_errors,
+        "Hosted full-access override is not enabled in this process." if not agency_errors else "; ".join(agency_errors),
+        "Unset SPARK_ALLOW_HOSTED_FULL_ACCESS unless this is a private, approval-gated operator environment.",
+        severity="high",
+    ))
+
+    visibility_errors = audit_visibility_errors()
+    checks.append(security_check(
+        "audit_visibility",
+        not visibility_errors,
+        "Spark logs are present for tracked runtime processes." if not visibility_errors else "; ".join(visibility_errors[:6]),
+        "Run `spark live restart` so supervised processes recreate logs, then rerun the audit.",
         severity="medium",
     ))
 

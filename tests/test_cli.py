@@ -100,6 +100,9 @@ from spark_cli.cli import (
     render_init_spark_toml,
     scaffold_module_files,
     save_json,
+    dependency_lockfile_errors,
+    endpoint_security_errors,
+    module_supply_chain_errors,
     security_provider_detail,
     validate_init_module_name,
     describe_install_risk,
@@ -691,6 +694,57 @@ class SparkCliTests(unittest.TestCase):
         })
         self.assertIn("chat=anthropic/sonnet via claude_oauth", detail)
         self.assertIn("mission=codex/gpt-5.5 via codex_oauth (not ready)", detail)
+
+    def test_module_supply_chain_errors_flag_unpinned_dirty_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            spark_home = Path(tmp_dir) / ".spark"
+            module_path = spark_home / "modules" / "spawner-ui" / "source"
+            (module_path / ".git").mkdir(parents=True)
+            installed = {"spawner-ui": {"path": str(module_path)}}
+            registry = {
+                "modules": {
+                    "spawner-ui": {
+                        "source": "https://github.com/vibeforge1111/vibeship-spawner-ui",
+                        "commit": "a" * 40,
+                        "blessed": True,
+                    }
+                }
+            }
+            with patch("spark_cli.cli.SPARK_HOME", spark_home), \
+                 patch("spark_cli.cli.load_json", return_value=installed), \
+                 patch("spark_cli.cli.load_registry_definition", return_value=registry), \
+                 patch("spark_cli.cli.git_current_head", return_value="b" * 40), \
+                 patch("spark_cli.cli.git_short_status", return_value=" M src/app.ts"):
+                errors = module_supply_chain_errors()
+        self.assertTrue(any("not pinned" in error for error in errors))
+        self.assertTrue(any("local git changes" in error for error in errors))
+
+    def test_dependency_lockfile_errors_flag_unlocked_node_module(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            module_path = Path(tmp_dir) / "module"
+            module_path.mkdir()
+            (module_path / "package.json").write_text('{"name":"demo"}', encoding="utf-8")
+            with patch("spark_cli.cli.load_json", return_value={"demo": {"path": str(module_path)}}):
+                errors = dependency_lockfile_errors()
+        self.assertEqual(errors, ["Node module `demo` has package.json but no dependency lockfile."])
+
+    def test_endpoint_security_errors_flag_metadata_service_url(self) -> None:
+        provider_payload = {
+            "ok": True,
+            "roles": {
+                "chat": {
+                    "provider": "openai",
+                    "model": "x",
+                    "auth_mode": "api_key",
+                    "ready": True,
+                    "base_url": "http://169.254.169.254/latest/meta-data",
+                }
+            },
+        }
+        with patch("spark_cli.cli.provider_status_payload", return_value=provider_payload), \
+             patch("spark_cli.cli.read_generated_env", return_value={}):
+            errors = endpoint_security_errors()
+        self.assertTrue(any("169.254.169.254" in error for error in errors))
 
     def test_provider_test_uses_configured_target_and_redacts_failures(self) -> None:
         with patch("spark_cli.cli.resolve_provider_test_target", return_value={
