@@ -1,6 +1,6 @@
 # Spark Live on Docker, Railway, and VPS
 
-Last updated: 2026-04-29
+Last updated: 2026-05-03
 
 Spark should be easy to test in an environment that is not the operator's laptop. This lane is for realtime sandbox agents: a disposable or persistent container that runs Spark Live, Telegram long polling, Builder, memory, character, and Spawner together.
 
@@ -61,6 +61,27 @@ allowlists that users can inspect and remove. Spark Live is not ready for a
 public "full operating system access" VPS mode until those approvals and
 sandbox boundaries are first-class.
 
+## Hosted Provider Recommendation
+
+For Railway and other headless hosts, use API-first provider auth. Hosted Spark
+should be boring: bot, Spawner, Mission Control, previews, and private relays run
+in the container; model work goes to an API provider or to a model server the
+container can reach.
+
+Safe hosted defaults:
+
+- `zai`, `openai`, `openrouter`, `kimi`, `huggingface`, and `minimax` use
+  provider API keys.
+- `anthropic` uses `ANTHROPIC_API_KEY` in hosted containers. Claude Code OAuth
+  stays a local desktop route.
+- `codex` may use the Codex CLI in hosted containers only with a dedicated
+  `OPENAI_API_KEY`. The live image writes that key into `CODEX_HOME` at startup.
+- `lmstudio` and `ollama` should point at a reachable model server. Do not expect
+  Railway to run large local models inside the Spark container.
+
+Do not copy personal `~/.codex`, Claude Code, browser profile, or desktop OAuth
+state into Railway. Use revocable service keys for hosted sandboxes.
+
 ## Required Environment
 
 Minimum:
@@ -77,6 +98,7 @@ Supported `SPARK_LLM_PROVIDER` values for headless hosts:
 | Provider | Required env | Notes |
 |---|---|---|
 | `zai` | `ZAI_API_KEY` | Good default for API-key VPS sandboxes. |
+| `codex` | `OPENAI_API_KEY` | Codex CLI in the container, authenticated from a dedicated OpenAI key. |
 | `openai` | `OPENAI_API_KEY` | Use this for OpenAI API keys. |
 | `openrouter` | `OPENROUTER_API_KEY` | Broad model gateway. |
 | `kimi` | `KIMI_API_KEY` | Moonshot/Kimi OpenAI-compatible route. |
@@ -86,7 +108,10 @@ Supported `SPARK_LLM_PROVIDER` values for headless hosts:
 | `lmstudio` | `LMSTUDIO_BASE_URL`, optional `LMSTUDIO_MODEL` | Only if the container can reach your LM Studio server. |
 | `ollama` | `OLLAMA_URL`, optional `OLLAMA_MODEL` | Only if the container can reach your Ollama server. |
 
-Do not use `codex` for Railway/VPS containers. Codex OAuth is an interactive local CLI sign-in path, so it belongs on a user's machine, not in a headless hosted container. Use `openai` with an API key for hosted OpenAI access.
+Codex OAuth is an interactive local CLI sign-in path. It belongs on a user's
+machine, not in a hosted container. For hosted Codex, use `SPARK_LLM_PROVIDER=codex`
+with `OPENAI_API_KEY`, or use `SPARK_LLM_PROVIDER=openai` if you want the direct
+OpenAI API route instead of the Codex CLI route.
 
 Optional:
 
@@ -162,6 +187,7 @@ TELEGRAM_BOT_TOKEN
 TELEGRAM_ADMIN_IDS
 SPARK_LLM_PROVIDER
 ZAI_API_KEY / OPENAI_API_KEY / etc.
+CODEX_HOME=/data/spark/codex
 SPARK_SPAWNER_PORT=${PORT}
 ```
 

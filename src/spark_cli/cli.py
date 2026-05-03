@@ -7733,8 +7733,10 @@ def hosted_headless_provider_errors(env: dict[str, str] | None = None) -> list[s
             continue
 
         auth_mode = (source.get(f"SPARK_{role.upper()}_LLM_AUTH_MODE") or source.get("SPARK_LLM_AUTH_MODE") or "").strip().lower()
-        if provider == "codex" or auth_mode == "codex_oauth":
-            errors.append(f"{role} uses Codex OAuth/CLI; hosted Docker/Railway needs an API-key or local-network provider.")
+        if auth_mode == "codex_oauth":
+            errors.append(f"{role} uses Codex OAuth; hosted Docker/Railway needs a dedicated OPENAI_API_KEY.")
+        elif provider == "codex" and not (source.get("OPENAI_API_KEY") or "").strip():
+            errors.append(f"{role} uses Codex CLI but OPENAI_API_KEY is not configured for hosted mode.")
         elif provider == "anthropic" and auth_mode == "claude_oauth":
             errors.append(f"{role} uses Claude Code OAuth/CLI; hosted Docker/Railway needs ANTHROPIC_API_KEY.")
         elif provider == "anthropic" and not (source.get("ANTHROPIC_API_KEY") or "").strip():
@@ -8063,7 +8065,7 @@ def collect_hosted_security_payload(*, deep: bool = False) -> dict[str, Any]:
                 if not provider_errors and not local_provider_endpoint_errors
                 else "; ".join(provider_errors + local_provider_endpoint_errors)
             ),
-            "repair": "Use zai, kimi, openrouter, huggingface, minimax, openai API key, anthropic API key, LM Studio, or Ollama for hosted Spark.",
+            "repair": "Use API-key providers for hosted Spark: zai, kimi, openrouter, huggingface, minimax, openai, codex with OPENAI_API_KEY, anthropic with ANTHROPIC_API_KEY, or a reachable LM Studio/Ollama endpoint.",
         },
         {
             "name": "strict_runtime_pins",

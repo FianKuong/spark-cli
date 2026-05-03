@@ -70,7 +70,7 @@ fi
 
 provider="${SPARK_LLM_PROVIDER:-}"
 if [ -z "$provider" ]; then
-  die "SPARK_LLM_PROVIDER is required. Good VPS/Railway choices: zai, openai, openrouter, kimi, huggingface, minimax, anthropic with API key."
+  die "SPARK_LLM_PROVIDER is required. Good VPS/Railway choices: zai, codex with OPENAI_API_KEY, openai, openrouter, kimi, huggingface, minimax, anthropic with API key."
 fi
 
 require_env TELEGRAM_BOT_TOKEN
@@ -140,14 +140,17 @@ case "$provider" in
     require_env ANTHROPIC_API_KEY
     setup_args+=(--anthropic-api-key "@env:ANTHROPIC_API_KEY")
     ;;
+  codex)
+    require_env OPENAI_API_KEY
+    export CODEX_HOME="${CODEX_HOME:-${SPARK_HOME:-/data/spark}/codex}"
+    mkdir -p "$CODEX_HOME"
+    printenv OPENAI_API_KEY | codex login --with-api-key >/dev/null
+    ;;
   lmstudio)
     setup_args+=(--lmstudio-base-url "${LMSTUDIO_BASE_URL:-http://host.docker.internal:1234/v1}" --lmstudio-model "${LMSTUDIO_MODEL:-local-model}")
     ;;
   ollama)
     setup_args+=(--ollama-url "${OLLAMA_URL:-http://host.docker.internal:11434}" --ollama-model "${OLLAMA_MODEL:-llama3.2:3b}")
-    ;;
-  codex)
-    die "codex OAuth is interactive and is not supported in a headless VPS/Railway container. Use openai with OPENAI_API_KEY, or run Spark locally after codex login."
     ;;
   *)
     die "Unsupported SPARK_LLM_PROVIDER '$provider'."
@@ -163,6 +166,7 @@ if [ -n "${SPARK_MODEL:-}" ]; then
     huggingface) setup_args+=(--huggingface-model "$SPARK_MODEL") ;;
     minimax) setup_args+=(--minimax-model "$SPARK_MODEL") ;;
     anthropic) setup_args+=(--anthropic-model "$SPARK_MODEL") ;;
+    codex) setup_args+=(--codex-model "$SPARK_MODEL") ;;
     lmstudio) setup_args+=(--lmstudio-model "$SPARK_MODEL") ;;
     ollama) setup_args+=(--ollama-model "$SPARK_MODEL") ;;
   esac
