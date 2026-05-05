@@ -1,5 +1,10 @@
 {
   "schema": 1,
+  "source": {
+    "repository": "https://github.com/vibeforge1111/spark-cli",
+    "releaseName": "spark-cli-launch-2026-05-05",
+    "ref": "33f52540d070fd1b7ddd3c0eca68cd353c85795b"
+  },
   "installers": {
     "install.sh": {
       "path": "scripts/install.sh",

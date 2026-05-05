@@ -101,7 +101,7 @@ The Windows installer adds `~\.spark\bin` to your user PATH so a new CMD or Powe
 
 The launch docs intentionally avoid piping remote scripts directly into a shell. The installer also verifies the managed Node archive against Node's published `SHASUMS256.txt` before extraction.
 If a good Node/npm is already installed, the installer uses it to avoid a slow first-run download; pass `-ManagedNode` on Windows or `--managed-node` on macOS/Linux to force Spark's verified managed Node runtime.
-Before deploying installer changes, verify the committed script manifest locally with `spark verify --installers`. After deploying `agent.sparkswarm.ai`, run `spark verify --installers --hosted-installers` to catch stale hosted copies.
+Before deploying installer changes, verify the committed script manifest locally with `spark verify --installers`. After deploying `agent.sparkswarm.ai`, run `spark verify --installers --hosted-installers` to catch stale hosted copies, stale hosted checksums, stale `/install/commands.json`, and stale `/install/release-manifest.json`.
 
 After setup, the macOS/Linux/WSL installer runs `spark autostart on --now` by default. That starts the Telegram starter stack immediately and installs the operating-system login hook so Spark comes back after the computer logs in. Use `--no-autostart` or `SPARK_AUTOSTART=0` if you only want to install/configure and start Spark manually later. Run `spark fix autostart` if login startup is missing, stale, or points at an old Spark home.
 
@@ -405,9 +405,18 @@ Current focused suite lives in `tests/test_cli.py`.
 Before publishing registry or installer changes, also run:
 
 ```bash
+python -m spark_cli.cli verify --installers --json
 python -m spark_cli.cli verify --registry-pins --json
 python -m spark_cli.cli verify --provenance --json
 ```
+
+For installer releases, green means the full public release surface is ready, not just that unit tests passed. The final post-site-deploy check is:
+
+```bash
+python -m spark_cli.cli verify --installers --hosted-installers --json
+```
+
+That check must pass before calling the installer ready. It verifies local script hashes, committed installer release metadata, hosted installer bytes, hosted checksum metadata, hosted copy-command metadata, and the hosted release manifest all agree.
 
 ### Optional Docker Workbench
 

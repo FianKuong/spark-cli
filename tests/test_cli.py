@@ -7165,10 +7165,23 @@ class SparkCliTests(unittest.TestCase):
         committed = collect_installer_integrity_payload()
         self.assertEqual(committed["manifest"], str(Path(__file__).resolve().parents[1] / "scripts" / "installer-manifest.json"))
         self.assertTrue(committed["ok"])
+        self.assertIn(
+            {
+                "name": "local_release_metadata",
+                "ok": True,
+                "expected_release": payload["source"]["releaseName"],
+                "actual_release": payload["source"]["releaseName"],
+                "expected_ref": payload["source"]["ref"],
+                "actual_ref": payload["source"]["ref"],
+                "detail": "Installer release pins match committed installer manifest metadata.",
+            },
+            committed["checks"],
+        )
         expected = {name: item["sha256"] for name, item in payload["installers"].items()}
         actual = {
             check["name"].removeprefix("local_"): check["actual_sha256"]
             for check in committed["checks"]
+            if check["name"].startswith("local_install.")
         }
         self.assertEqual(actual, expected)
 
@@ -7190,16 +7203,31 @@ class SparkCliTests(unittest.TestCase):
         local_hashes = {
             check["name"].removeprefix("local_"): check["actual_sha256"]
             for check in local["checks"]
+            if check["name"].startswith("local_install.")
         }
+        source = installer_manifest_payload()["source"]
         checksums_payload = (
             f"{local_hashes['install.sh']}  install.sh\n"
             f"{local_hashes['install.ps1']}  install.ps1\n"
+        ).encode("utf-8")
+        release_manifest_payload = json.dumps(
+            {"sparkCli": {"releaseName": source["releaseName"], "commit": source["ref"]}}
+        ).encode("utf-8")
+        commands_payload = json.dumps(
+            {
+                "checksums": {"sha256": local_hashes},
+                "source": {"releaseName": source["releaseName"], "ref": source["ref"]},
+            }
         ).encode("utf-8")
 
         def fake_urlopen(request: Any, timeout: int = 0) -> FakeResponse:
             url = request.full_url
             if url.endswith("/install/checksums.txt"):
                 return FakeResponse(checksums_payload)
+            if url.endswith("/install/release-manifest.json"):
+                return FakeResponse(release_manifest_payload)
+            if url.endswith("/install/commands.json"):
+                return FakeResponse(commands_payload)
             if url.endswith("/install.sh"):
                 return FakeResponse((Path(__file__).resolve().parents[1] / "scripts" / "install.sh").read_bytes())
             if url.endswith("/install.ps1"):
@@ -7212,7 +7240,62 @@ class SparkCliTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         checks = {check["name"]: check for check in payload["checks"]}
         self.assertEqual(checks["hosted_install.sh"]["expected_sha256"], local_hashes["install.sh"])
+        self.assertEqual(checks["hosted_install.sh"]["hosted_metadata_sha256"], local_hashes["install.sh"])
         self.assertIn("hosted checksum metadata", checks["hosted_install.sh"]["detail"])
+        self.assertTrue(checks["hosted_release_manifest"]["ok"])
+        self.assertTrue(checks["hosted_commands_metadata"]["ok"])
+
+    def test_hosted_installer_checks_fail_when_hosted_metadata_is_stale(self) -> None:
+        class FakeResponse:
+            def __init__(self, payload: bytes) -> None:
+                self.payload = payload
+
+            def __enter__(self) -> "FakeResponse":
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+            def read(self) -> bytes:
+                return self.payload
+
+        stale_ref = "0" * 40
+        checksums_payload = (
+            f"{'1' * 64}  install.sh\n"
+            f"{'2' * 64}  install.ps1\n"
+        ).encode("utf-8")
+        release_manifest_payload = json.dumps(
+            {"sparkCli": {"releaseName": "old-release", "commit": stale_ref}}
+        ).encode("utf-8")
+        commands_payload = json.dumps(
+            {
+                "checksums": {"sha256": {"install.sh": "1" * 64, "install.ps1": "2" * 64}},
+                "source": {"releaseName": "old-release", "ref": stale_ref},
+            }
+        ).encode("utf-8")
+
+        def fake_urlopen(request: Any, timeout: int = 0) -> FakeResponse:
+            url = request.full_url
+            if url.endswith("/install/checksums.txt"):
+                return FakeResponse(checksums_payload)
+            if url.endswith("/install/release-manifest.json"):
+                return FakeResponse(release_manifest_payload)
+            if url.endswith("/install/commands.json"):
+                return FakeResponse(commands_payload)
+            if url.endswith("/install.sh"):
+                return FakeResponse((Path(__file__).resolve().parents[1] / "scripts" / "install.sh").read_bytes())
+            if url.endswith("/install.ps1"):
+                return FakeResponse((Path(__file__).resolve().parents[1] / "scripts" / "install.ps1").read_bytes())
+            raise AssertionError(url)
+
+        with patch("spark_cli.cli.urllib.request.urlopen", side_effect=fake_urlopen):
+            payload = collect_installer_integrity_payload(hosted=True)
+
+        self.assertFalse(payload["ok"])
+        checks = {check["name"]: check for check in payload["checks"]}
+        self.assertFalse(checks["hosted_install.sh"]["ok"])
+        self.assertFalse(checks["hosted_release_manifest"]["ok"])
+        self.assertFalse(checks["hosted_commands_metadata"]["ok"])
 
     def test_verify_installers_uses_integrity_payload(self) -> None:
         args = build_parser().parse_args(["verify", "--installers", "--json"])
