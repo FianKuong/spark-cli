@@ -511,7 +511,16 @@ EOF
 
 print_plan() {
   cat <<EOF
-[spark-install] Dry run plan
+Spark install preview
+Nothing has changed yet.
+
+Spark will:
+  1. Install the Spark command
+  2. Connect your Telegram bot
+  3. Help you choose an AI provider
+  4. Start Spark
+
+Details:
   Dry-run safety:     no network and no writes in --dry-run mode
   Prefix:              $SPARK_PREFIX
   Node platform:       $SPARK_NODE_PLATFORM
@@ -544,7 +553,7 @@ Would download if needed:
   Python $SPARK_PYTHON_VERSION via uv when Python 3.11+ is missing
   Spark CLI from $SPARK_CLI_SOURCE at $SPARK_CLI_REF
 
-Network allowlist:
+Expected installer network access:
   nodejs.org
   github.com/astral-sh/uv
   github.com/vibeforge1111/spark-cli
@@ -553,14 +562,17 @@ Would run:
   python -m venv "$SPARK_PREFIX/tools/spark-cli-venv"
 EOF
   if [ "$SPARK_SKIP_SETUP" != "1" ]; then
-    if [ -n "$SPARK_LLM_PROVIDER" ]; then
-      printf '  "%s/bin/spark" setup "%s" --llm-provider "%s"\n' "$SPARK_PREFIX" "$SPARK_BUNDLE" "$SPARK_LLM_PROVIDER"
+    local setup_start_args
+    if [ "$SPARK_AUTOSTART" = "1" ]; then
+      setup_start_args='--start-now --autostart'
     else
-      printf '  "%s/bin/spark" setup "%s"\n' "$SPARK_PREFIX" "$SPARK_BUNDLE"
+      setup_start_args='--no-start-now --no-autostart'
     fi
-  fi
-  if [ "$SPARK_AUTOSTART" = "1" ]; then
-    printf '  "%s/bin/spark" autostart install "%s" --now\n' "$SPARK_PREFIX" "$SPARK_BUNDLE"
+    if [ -n "$SPARK_LLM_PROVIDER" ]; then
+      printf '  "%s/bin/spark" setup "%s" %s --llm-provider "%s"\n' "$SPARK_PREFIX" "$SPARK_BUNDLE" "$setup_start_args" "$SPARK_LLM_PROVIDER"
+    else
+      printf '  "%s/bin/spark" setup "%s" %s\n' "$SPARK_PREFIX" "$SPARK_BUNDLE" "$setup_start_args"
+    fi
   fi
 }
 
@@ -573,7 +585,7 @@ confirm_install() {
     echo "Rerun with --yes only after reviewing the dry-run plan." >&2
     exit 1
   fi
-  printf '\nRun Spark installer now? Type yes: '
+  printf '\nReady to install Spark now?\nType yes to continue, or press Ctrl-C to cancel: '
   local answer
   IFS= read -r answer
   case "$answer" in
@@ -823,7 +835,12 @@ EOF
     cp "$SPARK_LOCAL_REGISTRY" "$cli_dir/registry.json"
   fi
 
-  local spark_setup_cmd=("$SPARK_PREFIX/bin/spark" setup "$SPARK_BUNDLE" "--no-autostart")
+  local spark_setup_cmd=("$SPARK_PREFIX/bin/spark" setup "$SPARK_BUNDLE")
+  if [ "$SPARK_AUTOSTART" = "1" ]; then
+    spark_setup_cmd+=("--start-now" "--autostart")
+  else
+    spark_setup_cmd+=("--no-start-now" "--no-autostart")
+  fi
   local spark_secret_ref_value=""
   spark_secret_ref() {
     local value="$1"
@@ -888,28 +905,7 @@ run_autostart() {
   if [ "$SPARK_SKIP_SETUP" = "1" ]; then
     return
   fi
-  if [ "$SPARK_AUTOSTART" != "1" ]; then
-    log "Skipping Spark autostart"
-    cat <<EOF
-
-To start Spark manually:
-  $SPARK_PREFIX/bin/spark start $SPARK_BUNDLE
-EOF
-    return
-  fi
-
-  log "Installing Spark autostart"
-  if ! "$SPARK_PREFIX/bin/spark" autostart install "$SPARK_BUNDLE" --now; then
-    cat <<EOF
-
-Spark autostart could not be enabled automatically.
-Manual fallback for this session:
-  $SPARK_PREFIX/bin/spark start $SPARK_BUNDLE
-
-To try autostart again:
-  $SPARK_PREFIX/bin/spark autostart on --now
-EOF
-  fi
+  log "Spark startup was handled by setup"
 }
 
 main() {

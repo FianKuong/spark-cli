@@ -40,6 +40,7 @@ from spark_cli.cli import (
     configure_telegram_profile,
     cmd_secrets_set,
     cmd_live,
+    cmd_onboard,
     cmd_start,
     cmd_setup,
     cmd_uninstall,
@@ -104,6 +105,9 @@ from spark_cli.cli import (
     scaffold_module_files,
     save_json,
     dependency_lockfile_errors,
+    dependency_lock_integrity_errors,
+    dependency_hash_mode_errors,
+    dependency_pin_errors,
     endpoint_security_errors,
     module_supply_chain_errors,
     security_provider_detail,
@@ -198,9 +202,11 @@ from spark_cli.cli import (
     start_module,
     stop_module,
     scan_module_trust,
+    telegram_first_message_seen,
     telegram_profile_runtime_status,
     validate_telegram_profile_token_identity,
     tracked_process_keys_for_module,
+    wait_for_telegram_first_message,
     wait_for_ready_check,
     write_boundary_env,
     write_denied_paths,
@@ -976,6 +982,78 @@ class SparkCliTests(unittest.TestCase):
             with patch("spark_cli.cli.load_json", return_value={"demo": {"path": str(module_path)}}):
                 errors = dependency_lockfile_errors()
         self.assertEqual(errors, ["Node module `demo` has package.json but no dependency lockfile."])
+
+    def test_dependency_pin_errors_flag_unpinned_requirements(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            module_path = Path(tmp_dir) / "module"
+            module_path.mkdir()
+            (module_path / "requirements.txt").write_text(
+                "\n".join(["requests>=2", "httpx==0.28.0", "demo @ https://example.invalid/demo.whl"]),
+                encoding="utf-8",
+            )
+            with patch("spark_cli.cli.load_json", return_value={"demo": {"path": str(module_path)}}):
+                errors = dependency_pin_errors()
+        self.assertEqual(errors, ["Python module `demo` has unpinned requirements: requests>=2."])
+
+    def test_dependency_lock_integrity_errors_flag_stale_node_lockfile(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            module_path = Path(tmp_dir) / "module"
+            module_path.mkdir()
+            (module_path / "package.json").write_text(
+                json.dumps({"dependencies": {"left-pad": "^1.3.0", "tool": "git+https://example.invalid/tool.git#main"}}),
+                encoding="utf-8",
+            )
+            (module_path / "package-lock.json").write_text(
+                json.dumps({
+                    "name": "demo",
+                    "lockfileVersion": 3,
+                    "packages": {
+                        "": {"dependencies": {"left-pad": "^1.2.0", "tool": "git+https://example.invalid/tool.git#main"}},
+                        "node_modules/left-pad": {"version": "1.3.0"},
+                    },
+                }),
+                encoding="utf-8",
+            )
+            with patch("spark_cli.cli.load_json", return_value={"demo": {"path": str(module_path)}}):
+                errors = dependency_lock_integrity_errors()
+        self.assertTrue(any("stale for `left-pad`" in error for error in errors))
+        self.assertTrue(any("unpinned git/source spec" in error for error in errors))
+
+    def test_dependency_hash_mode_errors_flag_unhashed_requirements(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            module_path = Path(tmp_dir) / "module"
+            module_path.mkdir()
+            (module_path / "requirements.txt").write_text(
+                "\n".join([
+                    "--require-hashes",
+                    "httpx==0.28.0 --hash=sha256:" + "a" * 64,
+                    "requests==2.32.5",
+                ]),
+                encoding="utf-8",
+            )
+            with patch("spark_cli.cli.load_json", return_value={"demo": {"path": str(module_path)}}):
+                errors = dependency_hash_mode_errors()
+        self.assertEqual(errors, ["Python module `demo` uses --require-hashes but has unhashed requirements: requests==2.32.5."])
+
+    def test_telegram_first_message_event_reader_matches_session(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            event_path = Path(tmp_dir) / "events.jsonl"
+            event_path.write_text(
+                "\n".join(
+                    [
+                        "not-json",
+                        json.dumps({"event": "telegram_first_message", "session": "ember-1111", "replied": False}),
+                        json.dumps({"event": "telegram_first_message", "session": "ember-2222", "replied": True, "chat_id": 7}),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            missing = telegram_first_message_seen("ember-3333", event_path)
+            seen = wait_for_telegram_first_message("ember-2222", 0, event_path, poll_seconds=0.1)
+        self.assertFalse(missing["received"])
+        self.assertTrue(seen["received"])
+        self.assertTrue(seen["replied"])
+        self.assertEqual(seen["chat_id"], 7)
 
     def test_endpoint_security_errors_flag_metadata_service_url(self) -> None:
         provider_payload = {
@@ -2730,9 +2808,12 @@ class SparkCliTests(unittest.TestCase):
     def test_setup_autostart_defaults_on_and_can_be_disabled(self) -> None:
         default_args = build_parser().parse_args(["setup", "--non-interactive"])
         disabled_args = build_parser().parse_args(["setup", "--non-interactive", "--no-autostart"])
+        no_start_args = build_parser().parse_args(["setup", "--non-interactive", "--no-start-now"])
 
         self.assertTrue(default_args.autostart)
+        self.assertTrue(default_args.start_now)
         self.assertFalse(disabled_args.autostart)
+        self.assertFalse(no_start_args.start_now)
 
     def test_restart_accepts_starter_bundle_target(self) -> None:
         args = build_parser().parse_args(["restart", "telegram-starter"])
@@ -3391,10 +3472,9 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("Run another Telegram bot", output)
         self.assertIn("spark start spark-telegram-bot --profile qa-bot", output)
         self.assertIn("Access levels", output)
-        self.assertIn("Level 2 - Build When Asked", output)
-        self.assertIn("Level 3 - Research + Build: Default.", output)
-        self.assertIn("Level 4 - Full Access", output)
-        self.assertIn("operating-system access", output)
+        self.assertIn("Level 2: Requested builds and missions", output)
+        self.assertIn("Level 3: Default.", output)
+        self.assertIn("Level 4: Local projects, files, debugging", output)
         self.assertIn("spark secrets list", output)
         self.assertIn("spark fix autostart", output)
         self.assertIn("spark autostart off", output)
@@ -3412,8 +3492,8 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("telegram_commands", payload)
         self.assertIn("multi_bot_profiles", payload)
         self.assertIn("access_levels", payload)
-        self.assertEqual(payload["access_levels"][2]["name"], "Research + Build")
-        self.assertIn("Default", payload["access_levels"][2]["use"])
+        self.assertNotIn("name", payload["access_levels"][2])
+        self.assertIn("Default", payload["access_levels"][2]["about"])
         self.assertIn("Windows PowerShell/CMD", payload["operating_systems"])
         self.assertEqual(
             [item["role"] for item in payload["setup"]["llm_roles"]],
@@ -3545,12 +3625,25 @@ class SparkCliTests(unittest.TestCase):
                 "LOG_DIR": spark_home / "logs",
                 "REGISTRY_PATH": state_dir / "installed.json",
                 "CONFIG_PATH": state_dir / "setup.json",
+                "SETUP_PENDING_PATH": state_dir / "setup.pending.json",
+                "TELEGRAM_FIRST_MESSAGE_EVENTS_PATH": state_dir / "onboarding" / "telegram-first-message.jsonl",
                 "PID_PATH": state_dir / "pids.json",
                 "INSTALL_PROGRESS_PATH": state_dir / "install_progress.json",
                 "USER_CONFIG_PATH": config_dir / "config.json",
                 "SECRETS_INDEX_PATH": config_dir / "secrets_index.json",
                 "SECRETS_FILE_PATH": config_dir / "secrets.local.json",
             }
+            onboarding_event_path = patches["TELEGRAM_FIRST_MESSAGE_EVENTS_PATH"]
+            onboarding_event_path.parent.mkdir(parents=True, exist_ok=True)
+            onboarding_event_path.write_text(
+                json.dumps({
+                    "event": "telegram_first_message",
+                    "session": "ember-9999",
+                    "replied": True,
+                    "chat_id": 111,
+                }) + "\n",
+                encoding="utf-8",
+            )
             args = build_parser().parse_args(
                 [
                     "setup",
@@ -3567,24 +3660,28 @@ class SparkCliTests(unittest.TestCase):
                     "zai",
                     "--zai-api-key",
                     "zai-test-key",
+                    "--wait-first-message-seconds",
+                    "1",
                 ]
             )
 
             with patch.multiple("spark_cli.cli", **patches), \
+                 patch("spark_cli.cli.new_onboarding_session_code", return_value="ember-9999"), \
                  patch("spark_cli.cli.load_registry_definition", return_value=registry), \
                  patch("spark_cli.cli.keychain_available", return_value=False), \
                  patch("spark_cli.cli.detect_codex_cli", return_value={"present": True, "path": "codex"}), \
                  patch("sys.stdout", new_callable=StringIO) as stdout:
                 self.assertEqual(cmd_setup(args), 0)
             setup_output = stdout.getvalue()
-            self.assertIn("Spark is installed. Your first run:", setup_output)
-            self.assertIn("spark autostart on --now", setup_output)
-            self.assertIn("Pick an access level", setup_output)
-            self.assertIn("/access 3", setup_output)
+            self.assertIn("Spark is live.", setup_output)
+            self.assertIn("Open Telegram and send:", setup_output)
+            self.assertIn("/start ember-9999", setup_output)
+            self.assertIn("[OK] Spark heard you.", setup_output)
+            self.assertIn("[OK] Spark replied.", setup_output)
+            self.assertIn("Autostart: disabled", setup_output)
+            self.assertIn("Access: level 3 recommended", setup_output)
             self.assertIn("spark verify --onboarding", setup_output)
-            self.assertIn("spark start telegram-starter", setup_output)
-            self.assertIn("/diagnose", setup_output)
-            self.assertIn("Need a bot token? Open @BotFather", setup_output)
+            self.assertIn("spark fix telegram", setup_output)
             self.assertIn("LLM roles:", setup_output)
             self.assertIn("chat: zai", setup_output)
             self.assertIn("mission: zai", setup_output)
@@ -3664,6 +3761,46 @@ class SparkCliTests(unittest.TestCase):
             self.assertEqual(secrets_index["telegram.relay_secret"], "file")
             self.assertEqual(secrets_index["telegram.profiles.primary.bot_token"], "file")
             self.assertIn("telegram.relay_secret", secrets_file)
+
+    def test_cmd_onboard_resumes_pending_setup(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            state_dir = tmp / "state"
+            state_dir.mkdir()
+            pending_path = state_dir / "setup.pending.json"
+            save_json(pending_path, {"bundle": "telegram-starter", "detail": "token validation failed"})
+            with patch("spark_cli.cli.STATE_DIR", state_dir), \
+                 patch("spark_cli.cli.CONFIG_PATH", state_dir / "setup.json"), \
+                 patch("spark_cli.cli.REGISTRY_PATH", state_dir / "installed.json"), \
+                 patch("spark_cli.cli.SETUP_PENDING_PATH", pending_path), \
+                 patch("spark_cli.cli.cmd_setup", return_value=0) as setup_mock, \
+                 patch("sys.stdout", new_callable=StringIO) as stdout:
+                args = build_parser().parse_args(["onboard", "--no-wait-first-message"])
+                self.assertEqual(cmd_onboard(args), 0)
+        setup_mock.assert_called_once()
+        self.assertIn("resuming setup", stdout.getvalue().lower())
+
+    def test_cmd_onboard_starts_existing_setup_and_prints_first_message_code(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            state_dir = tmp / "state"
+            state_dir.mkdir()
+            config_path = state_dir / "setup.json"
+            registry_path = state_dir / "installed.json"
+            save_json(config_path, {"bundle": "telegram-starter", "onboarding_session": "ember-9999"})
+            save_json(registry_path, {"spark-telegram-bot": {"path": str(tmp)}})
+            with patch("spark_cli.cli.STATE_DIR", state_dir), \
+                 patch("spark_cli.cli.CONFIG_PATH", config_path), \
+                 patch("spark_cli.cli.REGISTRY_PATH", registry_path), \
+                 patch("spark_cli.cli.SETUP_PENDING_PATH", state_dir / "setup.pending.json"), \
+                 patch("spark_cli.cli.cmd_start", return_value=0) as start_mock, \
+                 patch("sys.stdout", new_callable=StringIO) as stdout:
+                args = build_parser().parse_args(["onboard", "--no-wait-first-message"])
+                self.assertEqual(cmd_onboard(args), 0)
+        start_mock.assert_called_once()
+        output = stdout.getvalue()
+        self.assertIn("Open Telegram and send:", output)
+        self.assertIn("/start ember-9999", output)
 
     def test_split_telegram_admin_ids_trims_and_deduplicates(self) -> None:
         self.assertEqual(split_telegram_admin_ids(" 111,222,111, ,333 "), ["111", "222", "333"])
@@ -5683,12 +5820,11 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(values, {})
         getpass_mock.assert_not_called()
         output = stdout.getvalue()
-        self.assertIn("Choose the LLM Spark will use", output)
-        self.assertIn("Agent = Telegram chat, runtime reasoning, memory, and recall.", output)
-        self.assertIn("Mission = Spawner/Mission Control builds, research, coding, and longer tracked work.", output)
-        self.assertIn("recommended OpenAI Codex path", output)
-        self.assertIn("MiniMax", output)
-        self.assertIn("OpenAI Codex CLI detected", output)
+        self.assertIn("How should Spark think?", output)
+        self.assertIn("Use my ChatGPT/Codex sign-in", output)
+        self.assertIn("Selected: OpenAI Codex", output)
+        self.assertIn("Requirement: codex must be installed and signed in", output)
+        self.assertIn("Status: found on PATH", output)
         self.assertIn("Same provider for Agent and Mission", output)
         self.assertNotIn("Role setup", output)
 
@@ -7823,8 +7959,9 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn('local env_file="$SPARK_PREFIX/env"', script)
         self.assertIn('export PATH="$SPARK_PREFIX/bin:$SPARK_NODE_BIN_DIR:\\$PATH"', script)
         self.assertIn('"$SPARK_PREFIX/bin/spark" setup "$SPARK_BUNDLE"', script)
-        self.assertIn('"$SPARK_PREFIX/bin/spark" autostart install "$SPARK_BUNDLE" --now', script)
-        self.assertIn('local spark_setup_cmd=("$SPARK_PREFIX/bin/spark" setup "$SPARK_BUNDLE" "--no-autostart")', script)
+        self.assertIn('spark_setup_cmd+=("--start-now" "--autostart")', script)
+        self.assertIn('spark_setup_cmd+=("--no-start-now" "--no-autostart")', script)
+        self.assertIn('local spark_setup_cmd=("$SPARK_PREFIX/bin/spark" setup "$SPARK_BUNDLE")', script)
         self.assertIn('spark_setup_cmd+=("--bot-token" "$spark_secret_ref_value")', script)
         self.assertIn('spark_setup_cmd+=("--admin-telegram-ids" "$SPARK_ADMIN_TELEGRAM_IDS")', script)
         self.assertIn('spark_setup_cmd+=("--llm-provider" "$SPARK_LLM_PROVIDER")', script)
@@ -7883,9 +8020,10 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn('if ($AdminTelegramIds) { $setupArgs += @("--admin-telegram-ids", $AdminTelegramIds) }', script)
         self.assertIn('if ($LlmProvider) { $setupArgs += @("--llm-provider", $LlmProvider) }', script)
         self.assertIn('if ($MiniMaxApiKey) { $setupArgs += @("--minimax-api-key", (New-SetupSecretRef $MiniMaxApiKey)) }', script)
-        self.assertIn("& $sparkCmd setup $Bundle --no-autostart @setupArgs", script)
+        self.assertIn('$setupStartArgs = if ($NoAutostart) { @("--no-start-now", "--no-autostart") } else { @("--start-now", "--autostart") }', script)
+        self.assertIn("& $sparkCmd setup $Bundle @setupStartArgs @setupArgs", script)
         self.assertIn("[switch]$NoAutostart", script)
-        self.assertIn("& $sparkCmd autostart install $Bundle --now", script)
+        self.assertIn("Spark startup was handled by setup", script)
         self.assertIn("spark providers list", script)
         self.assertIn("spark live start", script)
         self.assertIn("spark live status", script)

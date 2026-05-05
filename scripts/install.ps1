@@ -231,7 +231,16 @@ function Show-DryRunPlan {
     $autostartEnabled = if ($NoAutostart) { "no" } else { "yes" }
     $existing = if (Test-ExistingInstall) { "detected" } else { "none" }
     $existingMode = if ($UpgradeExisting) { "upgrade" } else { "abort" }
-    Write-Host "[spark-install] Dry run plan"
+    Write-Host "Spark install preview"
+    Write-Host "Nothing has changed yet."
+    Write-Host ""
+    Write-Host "Spark will:"
+    Write-Host "  1. Install the Spark command"
+    Write-Host "  2. Connect your Telegram bot"
+    Write-Host "  3. Help you choose an AI provider"
+    Write-Host "  4. Start Spark"
+    Write-Host ""
+    Write-Host "Details:"
     Write-Host "  Dry-run safety:     no network and no writes in -DryRun mode"
     Write-Host "  Prefix:              $Script:SparkPrefix"
     Write-Host "  Node platform:       win-x64"
@@ -264,7 +273,7 @@ function Show-DryRunPlan {
     Write-Host "  Python $PythonVersion via uv when Python 3.11+ is missing"
     Write-Host "  Spark CLI from $Source at $Ref"
     Write-Host ""
-    Write-Host "Network allowlist:"
+    Write-Host "Expected installer network access:"
     Write-Host "  nodejs.org"
     Write-Host "  github.com/astral-sh/uv"
     Write-Host "  github.com/vibeforge1111/spark-cli"
@@ -272,14 +281,12 @@ function Show-DryRunPlan {
     Write-Host "Would run:"
     Write-Host "  python -m venv `"$Script:SparkPrefix\tools\spark-cli-venv`""
     if (-not $SkipSetup) {
+        $setupStartArgs = if ($NoAutostart) { "--no-start-now --no-autostart" } else { "--start-now --autostart" }
         if ($LlmProvider) {
-            Write-Host "  `"$Script:SparkPrefix\bin\spark.cmd`" setup `"$Bundle`" --llm-provider `"$LlmProvider`""
+            Write-Host "  `"$Script:SparkPrefix\bin\spark.cmd`" setup `"$Bundle`" $setupStartArgs --llm-provider `"$LlmProvider`""
         } else {
-            Write-Host "  `"$Script:SparkPrefix\bin\spark.cmd`" setup `"$Bundle`""
+            Write-Host "  `"$Script:SparkPrefix\bin\spark.cmd`" setup `"$Bundle`" $setupStartArgs"
         }
-    }
-    if (-not $NoAutostart) {
-        Write-Host "  `"$Script:SparkPrefix\bin\spark.cmd`" autostart install `"$Bundle`" --now"
     }
 }
 
@@ -288,7 +295,7 @@ function Confirm-Install {
         return $true
     }
     try {
-        $answer = Read-Host "Run Spark installer now? Type yes"
+        $answer = Read-Host "Ready to install Spark now? Type yes to continue, or press Ctrl-C to cancel"
     } catch {
         throw "Interactive confirmation is required before installing. Rerun with -Yes only after reviewing the dry-run plan."
     }
@@ -637,7 +644,8 @@ function Run-Setup {
     $setupArgs += $SetupArg
     Write-SparkLog "Running spark setup $Bundle"
     try {
-        & $sparkCmd setup $Bundle --no-autostart @setupArgs
+        $setupStartArgs = if ($NoAutostart) { @("--no-start-now", "--no-autostart") } else { @("--start-now", "--autostart") }
+        & $sparkCmd setup $Bundle @setupStartArgs @setupArgs
         if ($LASTEXITCODE -ne 0) {
             throw "spark setup failed with exit code $LASTEXITCODE"
         }
@@ -652,26 +660,7 @@ function Run-Autostart {
     if ($SkipSetup) {
         return
     }
-    $sparkCmd = Join-Path $Script:SparkPrefix "bin\spark.cmd"
-    if ($NoAutostart) {
-        Write-SparkLog "Skipping Spark autostart"
-        Write-Host ""
-        Write-Host "To start Spark manually:"
-        Write-Host "  $sparkCmd start $Bundle"
-        return
-    }
-
-    Write-SparkLog "Installing Spark autostart"
-    & $sparkCmd autostart install $Bundle --now
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "Spark autostart could not be enabled automatically."
-        Write-Host ""
-        Write-Host "Manual fallback for this session:"
-        Write-Host "  $sparkCmd start $Bundle"
-        Write-Host ""
-        Write-Host "To try autostart again:"
-        Write-Host "  $sparkCmd autostart on --now"
-    }
+    Write-SparkLog "Spark startup was handled by setup"
 }
 
 function Invoke-Install {

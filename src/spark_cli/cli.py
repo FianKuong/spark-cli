@@ -47,6 +47,8 @@ MODULE_CONFIG_DIR = CONFIG_DIR / "modules"
 LOG_DIR = SPARK_HOME / "logs"
 REGISTRY_PATH = STATE_DIR / "installed.json"
 CONFIG_PATH = STATE_DIR / "setup.json"
+SETUP_PENDING_PATH = STATE_DIR / "setup.pending.json"
+TELEGRAM_FIRST_MESSAGE_EVENTS_PATH = STATE_DIR / "onboarding" / "telegram-first-message.jsonl"
 PID_PATH = STATE_DIR / "pids.json"
 PID_LOCK_PATH = STATE_DIR / "pids.json.lock"
 INSTALL_PROGRESS_PATH = STATE_DIR / "install_progress.json"
@@ -763,6 +765,10 @@ def remove_module_clone(name: str) -> None:
 def ensure_state_dirs() -> None:
     for path in (SPARK_HOME, STATE_DIR, CONFIG_DIR, MODULE_CONFIG_DIR, LOG_DIR):
         path.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
 
 
 def keychain_available() -> bool:
@@ -1378,6 +1384,165 @@ def timestamp_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 
+def new_onboarding_session_code() -> str:
+    alphabet = "23456789abcdefghjkmnpqrstuvwxyz"
+    return "ember-" + "".join(py_secrets.choice(alphabet) for _ in range(4))
+
+
+def save_pending_setup_state(stage: str, detail: str, setup_state: dict[str, Any] | None = None) -> None:
+    pending = {
+        "event": "setup_pending",
+        "updated_at": timestamp_now(),
+        "stage": stage,
+        "detail": detail,
+        "ready": ["Spark command installed"],
+        "still_needed": [
+            "Telegram bot was not verified",
+            "Spark modules may not be installed",
+            "Spark bot is not running",
+        ],
+        "next": "spark setup telegram-starter --resume",
+    }
+    if isinstance(setup_state, dict):
+        pending["bundle"] = setup_state.get("bundle")
+        pending["modules"] = setup_state.get("modules")
+        pending["telegram_ingress_owner"] = setup_state.get("telegram_ingress_owner")
+        pending["onboarding_session"] = setup_state.get("onboarding_session")
+    save_json(SETUP_PENDING_PATH, pending)
+
+
+def clear_pending_setup_state() -> None:
+    try:
+        SETUP_PENDING_PATH.unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
+def load_pending_setup_state() -> dict[str, Any]:
+    if not SETUP_PENDING_PATH.exists():
+        return {}
+    pending = load_json(SETUP_PENDING_PATH, {})
+    return pending if isinstance(pending, dict) else {}
+
+
+def print_setup_failure_truth_screen(detail: str) -> None:
+    print("")
+    print("Spark is not ready yet.")
+    print("")
+    print("Ready:")
+    print("  Spark command installed")
+    print("")
+    print("Still needed:")
+    print("  Telegram bot was not verified")
+    print("  Spark bot is not running")
+    print("")
+    print("Next:")
+    print("  spark setup telegram-starter --resume")
+    print("  spark fix telegram")
+    if detail:
+        print("")
+        print(f"Why setup stopped: {detail}")
+
+
+def read_telegram_first_message_events(path: Path | None = None) -> list[dict[str, Any]]:
+    event_path = path or TELEGRAM_FIRST_MESSAGE_EVENTS_PATH
+    if not event_path.exists():
+        return []
+    events: list[dict[str, Any]] = []
+    try:
+        for line in event_path.read_text(encoding="utf-8").splitlines():
+            raw = line.strip()
+            if not raw:
+                continue
+            try:
+                event = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                events.append(event)
+    except OSError:
+        return []
+    return events
+
+
+def telegram_first_message_seen(
+    session: str,
+    path: Path | None = None,
+) -> dict[str, Any]:
+    normalized = str(session or "").strip()
+    for event in reversed(read_telegram_first_message_events(path)):
+        if event.get("event") != "telegram_first_message":
+            continue
+        if normalized and str(event.get("session") or "").strip() != normalized:
+            continue
+        return {
+            "received": True,
+            "replied": bool(event.get("replied")),
+            "session": str(event.get("session") or ""),
+            "chat_id": event.get("chat_id"),
+            "user_id": event.get("user_id"),
+            "event": event,
+        }
+    return {"received": False, "replied": False, "session": normalized}
+
+
+def wait_for_telegram_first_message(
+    session: str,
+    timeout_seconds: int,
+    path: Path | None = None,
+    *,
+    poll_seconds: float = 1.0,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + max(0, int(timeout_seconds))
+    while True:
+        result = telegram_first_message_seen(session, path)
+        if result.get("received"):
+            result["timed_out"] = False
+            return result
+        if time.monotonic() >= deadline:
+            result["timed_out"] = True
+            return result
+        time.sleep(max(0.1, poll_seconds))
+
+
+def first_message_wait_seconds(args: argparse.Namespace, interactive: bool) -> int:
+    if not getattr(args, "wait_first_message", True):
+        return 0
+    explicit = getattr(args, "wait_first_message_seconds", None)
+    if explicit is not None:
+        return max(0, int(explicit))
+    return 60 if interactive else 0
+
+
+def print_first_message_wait_result(result: dict[str, Any]) -> None:
+    if result.get("received") and result.get("replied"):
+        print("[OK] Spark heard you.")
+        print("[OK] Spark replied.")
+        print("[OK] You are connected.")
+        return
+    if result.get("received"):
+        print("[FIX] Spark heard your first Telegram message, but no reply was recorded.")
+        print("      Run: spark fix telegram")
+        return
+    print("[FIX] Spark did not hear the first Telegram message before the wait timed out.")
+    print("      Check the bot token, admin id, and running process.")
+    print("      Run: spark fix telegram")
+
+
+def maybe_offer_first_message_repair(result: dict[str, Any], interactive: bool) -> None:
+    if result.get("received") and result.get("replied"):
+        return
+    if not interactive:
+        return
+    try:
+        answer = input("Run Telegram repair guidance now? [Y/n]: ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print("")
+        return
+    if answer in {"", "y", "yes"}:
+        cmd_fix(argparse.Namespace(target="telegram", json=False, redact_logs=False))
+
+
 def read_clipboard_text() -> str:
     commands: list[list[str]] = []
     if sys.platform == "win32":
@@ -1989,24 +2154,39 @@ def required_runtimes_for_modules(modules: list[Module]) -> list[str]:
 
 def print_setup_preflight(bundle: list[Module]) -> None:
     print("")
-    print("Spark setup preflight:")
+    print("Spark checked your computer:")
+    ready: list[str] = []
+    optional: list[str] = []
+    blocking: list[str] = []
     cc = detect_claude_code()
     if cc["present"]:
-        print(f"  [OK]   claude (Anthropic Claude Code) detected at {cc['path']}")
+        ready.append(f"claude at {cc['path']}")
     else:
-        print("  [miss] claude (Anthropic Claude Code) not on PATH -- install/sign in for `claude -p` subscription/OAuth-style calls")
+        optional.append("claude - needed only if you choose Claude")
     codex = detect_codex_cli()
     if codex["present"]:
-        print(f"  [OK]   codex (OpenAI Codex CLI) detected at {codex['path']}")
+        ready.append(f"codex at {codex['path']}")
     else:
-        print("  [miss] codex not on PATH -- install/sign in for OpenAI Codex OAuth-style calls")
+        optional.append("codex - needed only if you choose Codex")
     for runtime_name in required_runtimes_for_modules(bundle):
         info = detect_runtime_binary(runtime_name)
         if info["present"]:
             version = info.get("version") or "version unknown"
-            print(f"  [OK]   {runtime_name} -> {version}")
+            ready.append(f"{runtime_name} {version}")
         else:
-            print(f"  [miss] {runtime_name} not on PATH -- install before running setup")
+            blocking.append(f"{runtime_name} not on PATH")
+    print("")
+    print("Ready:")
+    for item in ready or ["none yet"]:
+        print(f"  {item}")
+    print("")
+    print("Optional:")
+    for item in optional or ["none"]:
+        print(f"  {item}")
+    print("")
+    print("Blocking issues:")
+    for item in blocking or ["none"]:
+        print(f"  {item}")
     constraint_lines = []
     for module in bundle:
         ok, detail = check_runtime_version_for_module(module)
@@ -2025,7 +2205,23 @@ def prompt_for_secret(secret_id: str, requirement: dict[str, Any]) -> str:
     required = bool(requirement.get("required"))
     prompt_text = str(requirement.get("prompt") or secret_id)
     suffix = "" if required else " (press enter to skip)"
+    if secret_id == "telegram.bot_token":
+        print("")
+        print("First, create a Telegram bot.")
+        print("  1. Open Telegram")
+        print("  2. Message @BotFather")
+        print("  3. Send /newbot")
+        print("  4. Copy the token BotFather gives you")
+        print("  5. Paste it here")
     if secret_id == "telegram.admin_ids":
+        print("")
+        print("Now Spark needs your Telegram user ID.")
+        print("This tells Spark who is allowed to control your bot.")
+        print("")
+        print("To find it:")
+        print("  1. Open Telegram")
+        print("  2. Message @userinfobot")
+        print("  3. Copy the number shown as Id")
         while True:
             try:
                 value = input(f"  {prompt_text}{suffix}: ").strip()
@@ -2586,6 +2782,24 @@ def prompt_for_provider_choice(prompt: str, default: str) -> str | None:
     return provider
 
 
+def prompt_for_provider_choice_from(prompt: str, default: str, options: Iterable[str]) -> str | None:
+    ordered = [provider for provider in options if provider in LLM_PROVIDER_CHOICES]
+    provider_by_number = {str(index): provider for index, provider in enumerate(ordered, start=1)}
+    try:
+        answer = input(prompt).strip().lower()
+    except EOFError:
+        return None
+    if not answer:
+        answer = default
+    if answer in {"0", "skip", "none", "not_configured"}:
+        return "not_configured"
+    provider = provider_by_number.get(answer, answer)
+    if provider not in ordered:
+        print(f"  Unknown provider `{answer}`.")
+        return None
+    return provider
+
+
 def prompt_for_provider_role_mode(default_provider: str) -> str:
     label = LLM_PROVIDER_LABELS.get(default_provider, default_provider)
     print("")
@@ -2648,36 +2862,80 @@ def collect_provider_api_keys(providers: list[str], secret_values: dict[str, str
     return updated
 
 
+def prompt_for_simple_provider_choice(default_provider: str) -> str | None:
+    default_label = LLM_PROVIDER_LABELS.get(default_provider, default_provider)
+    print("")
+    print("Choose the LLM Spark will use")
+    print("How should Spark think?")
+    print("  1. Use my ChatGPT/Codex sign-in")
+    print("  2. Use my Claude sign-in")
+    print("  3. Use an API key")
+    print("  4. Use a local model")
+    print("  5. Skip for now")
+    try:
+        answer = input(f"Provider path [1/{default_label}]: ").strip().lower()
+    except EOFError:
+        return None
+    if not answer:
+        return default_provider
+    if answer in {"1", "codex", "chatgpt", "openai codex"}:
+        return "codex"
+    if answer in {"2", "claude", "anthropic"}:
+        return "anthropic"
+    if answer in {"5", "0", "skip", "none", "not_configured"}:
+        return "not_configured"
+    if answer in {"3", "api", "api key", "key"}:
+        print("")
+        print("API key providers:")
+        api_providers = ("zai", "kimi", "openrouter", "huggingface", "minimax", "openai", "anthropic")
+        for index, provider in enumerate(api_providers, start=1):
+            print(f"  {index}. {describe_llm_provider_setup(provider)}")
+        provider = prompt_for_provider_choice_from("API provider [type number/name]: ", "zai", api_providers)
+        return provider
+    if answer in {"4", "local", "local model"}:
+        print("")
+        print("Local model providers:")
+        local_providers = ("lmstudio", "ollama")
+        for index, provider in enumerate(local_providers, start=1):
+            print(f"  {index}. {describe_llm_provider_setup(provider)}")
+        provider = prompt_for_provider_choice_from("Local provider [type number/name]: ", "lmstudio", local_providers)
+        return provider
+    if answer in LLM_PROVIDER_CHOICES:
+        return answer
+    print(f"  Unknown provider path `{answer}`.")
+    return None
+
+
+def print_selected_provider_status(provider: str) -> None:
+    print("")
+    print(f"Selected: {LLM_PROVIDER_LABELS.get(provider, provider)}")
+    if provider == "codex":
+        status = "found on PATH" if detect_codex_cli()["present"] else "not found on PATH"
+        print("Requirement: codex must be installed and signed in")
+        print(f"Status: {status}")
+    elif provider == "anthropic":
+        status = "found on PATH" if detect_claude_code()["present"] else "API key or Claude Code sign-in needed"
+        print("Requirement: Claude Code sign-in or an Anthropic API key")
+        print(f"Status: {status}")
+    elif provider in {"lmstudio", "ollama"}:
+        print("Requirement: local model server must be running when Spark replies")
+        print("Status: checked later by spark providers test")
+    else:
+        print("Requirement: API key")
+        print("Status: Spark will ask for it now if it is not already stored")
+
+
 def run_llm_provider_wizard(args: argparse.Namespace, secret_values: dict[str, str]) -> dict[str, str]:
     if setup_has_llm_provider_selection(args):
         return collect_provider_api_keys(selected_llm_providers(args, secret_values), secret_values)
     recommended_provider = "codex" if detect_codex_cli()["present"] else "openai"
-    recommended_index = LLM_PROVIDER_WIZARD_ORDER.index(recommended_provider) + 1
-    recommended_label = LLM_PROVIDER_LABELS[recommended_provider]
-    print("")
-    print("Choose the LLM Spark will use")
-    print("  Start with one provider for both Agent and Mission, or split them now if you already know what you want.")
-    print("  Agent = Telegram chat, runtime reasoning, memory, and recall.")
-    print("  Mission = Spawner/Mission Control builds, research, coding, and longer tracked work.")
-    print("  If you are not sure, pick based on what you already have:")
-    print("    - OpenAI Codex subscription or sign-in: OpenAI Codex CLI OAuth")
-    print("    - Anthropic Claude subscription or sign-in: Anthropic Claude Code with `claude -p`")
-    print("    - API keys already handy: Z.AI GLM, Kimi, OpenRouter, Hugging Face, MiniMax, OpenAI API")
-    print("    - Local/private first: LM Studio for desktop, Ollama for terminal")
-    print(f"  Press Enter for the recommended {recommended_label} path, or type a number/provider name.")
-    for index, provider in enumerate(LLM_PROVIDER_WIZARD_ORDER, start=1):
-        suffix = " [recommended]" if provider == recommended_provider else ""
-        print(f"  {index}. {describe_llm_provider_setup(provider)}{suffix}")
-    print("  0. Skip for now")
-    provider = prompt_for_provider_choice(
-        f"Default provider [{recommended_index}/{recommended_label}, 0 to skip]: ",
-        recommended_provider,
-    )
+    provider = prompt_for_simple_provider_choice(recommended_provider)
     if provider is None:
         return secret_values
     if provider == "not_configured":
         return secret_values
     setattr(args, "llm_provider", provider)
+    print_selected_provider_status(provider)
 
     role_mode = prompt_for_provider_role_mode(provider)
     if role_mode == "mission":
@@ -2934,6 +3192,8 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
         "TELEGRAM_RELAY_PORT": "8788",
         "SPARK_TELEGRAM_PROFILE": primary_telegram_profile(),
         "TELEGRAM_RELAY_SECRET": relay_secret,
+        "SPARK_ONBOARDING_SESSION": str(getattr(args, "onboarding_session", "") or ""),
+        "SPARK_ONBOARDING_EVENT_PATH": str(TELEGRAM_FIRST_MESSAGE_EVENTS_PATH),
     }
     if character is not None:
         gateway_env["SPARK_CHARACTER_ROOT"] = str(character.path)
@@ -4221,31 +4481,38 @@ def setup_should_run_install_commands(
     return module.name not in installed_modules
 
 
-def print_setup_next_steps(bundle_name: str, ingress_owner: Module, llm_state: dict[str, Any]) -> None:
+def print_setup_next_steps(
+    bundle_name: str,
+    ingress_owner: Module,
+    llm_state: dict[str, Any],
+    setup_state: dict[str, Any],
+    *,
+    start_now: bool,
+    start_ok: bool,
+    autostart_enabled: bool,
+) -> None:
     provider = llm_state.get("provider") or "unknown"
     model = llm_state.get("model") or "not configured"
     roles = llm_state.get("roles") if isinstance(llm_state.get("roles"), dict) else {}
+    session = str(setup_state.get("onboarding_session") or new_onboarding_session_code())
+    telegram_label = "@YourSparkBot"
     print("")
-    print("Spark is installed. Your first run:")
-    print("  1. Start Spark Live:")
-    print("     spark live start")
-    print("  2. Open Telegram and send /start to your Spark bot.")
-    print("  3. Pick an access level when Spark asks. Most people should choose /access 3.")
-    print("     You can change it later with /access 1-4.")
-    print("  4. Send /diagnose in Telegram and confirm everything looks OK.")
-    print("  5. Confirm your selected LLM can answer:")
-    print("     spark providers test --role chat")
-    print("  6. Run the onboarding check here if you want a second opinion:")
-    print("     spark verify --onboarding")
-    print("  7. Try memory and a tiny build:")
-    print("     /remember I like concise warm replies")
-    print("     /recall concise warm replies")
-    print("     /run say exactly OK")
+    if start_now and start_ok:
+        print("Spark is live.")
+    elif start_now:
+        print("Spark is installed, but not running yet.")
+    else:
+        print("Spark is configured, but not started yet.")
     print("")
-    print("Start Spark automatically when this computer logs in:")
-    print("     spark autostart on --now")
-    print("Manual fallback if Spark Live is unavailable:")
-    print("     spark start telegram-starter")
+    print(f"Telegram: {telegram_label}")
+    print("Access: level 3 recommended")
+    print(f"Autostart: {'enabled' if autostart_enabled else 'disabled'}")
+    print("")
+    print("Open Telegram and send:")
+    print(f"  /start {session}")
+    print("")
+    print("Spark learns from explicit memories, diagnostics, and approved missions.")
+    print("You stay in control of what it can do.")
     print("")
     if provider == "not_configured":
         print("LLM provider: not configured yet")
@@ -4259,15 +4526,14 @@ def print_setup_next_steps(bundle_name: str, ingress_owner: Module, llm_state: d
                 f"  - {role}: {role_state.get('provider', provider)} "
                 f"({role_state.get('model', model)}, auth={role_state.get('auth_mode', llm_state.get('auth_mode', 'unknown'))})"
             )
-    print("Need a bot token? Open @BotFather in Telegram, run /newbot, then rerun:")
-    print(f"     spark setup {bundle_name}")
-    print("Need to choose or change LLMs? Run `spark setup` for the guided picker, or use role flags for automation.")
-    print("OpenAI Codex CLI is the easiest OpenAI/ChatGPT sign-in route. Run `codex login`, then choose `codex` in setup.")
-    print("Anthropic Claude Code is the easiest Claude sign-in route. Run `claude`, verify `claude -p \"hello\"`, then choose `anthropic` in setup.")
-    print("Z.AI GLM, Kimi/Moonshot, OpenRouter, MiniMax, Hugging Face, and OpenAI API use API keys; Ollama and LM Studio stay local.")
-    print("For role-level control, use --chat-llm-provider, --builder-llm-provider, --memory-llm-provider, and --mission-llm-provider.")
-    print("Need to turn the agent off? Run `spark stop telegram-starter` or `spark autostart off`.")
-    print("Run `spark guide` anytime for BotFather, LLM, access levels, module, and Telegram command help.")
+    print("")
+    print("Checks:")
+    print("  spark verify --onboarding")
+    print("  spark fix telegram")
+    if not start_ok:
+        print("")
+        print("Start now:")
+        print(f"  spark start {bundle_name}")
 
 
 def resolve_setup_bundle_plan(args: argparse.Namespace) -> SetupBundlePlan:
@@ -4310,6 +4576,7 @@ def collect_setup_configuration(
     preserved_secret_keys = set(existing_setup.get("secret_keys", [])) if isinstance(existing_setup, dict) else set()
     preserved_profiles = existing_setup.get("telegram_profiles") if isinstance(existing_setup, dict) else None
     preserved_primary_profile = existing_setup.get(PRIMARY_TELEGRAM_PROFILE_KEY) if isinstance(existing_setup, dict) else None
+    preserved_onboarding_session = existing_setup.get("onboarding_session") if isinstance(existing_setup, dict) else None
     setup_state = {
         "bundle": args.bundle,
         "modules": [module.name for module in bundle],
@@ -4318,6 +4585,11 @@ def collect_setup_configuration(
         "secret_keys": sorted(preserved_secret_keys | set(secret_values.keys())),
         "llm": llm_setup_state(llm_provider, llm_env),
         "builder_home": str(spark_builder_home()),
+        "onboarding_session": (
+            str(preserved_onboarding_session).strip()
+            if isinstance(preserved_onboarding_session, str) and preserved_onboarding_session.strip()
+            else new_onboarding_session_code()
+        ),
     }
     sidecar_state = memory_sidecar_setup_state(args, existing_setup if isinstance(existing_setup, dict) else None)
     if sidecar_state is not None:
@@ -4444,6 +4716,9 @@ def print_setup_summary(
     builder_notes: list[str],
     keychain_report: dict[str, str],
     setup_state: dict[str, Any],
+    *,
+    start_now: bool = False,
+    start_ok: bool = False,
 ) -> None:
     print("Spark setup complete.")
     print(f"Bundle: {args.bundle}")
@@ -4455,40 +4730,144 @@ def print_setup_summary(
     if keychain_report:
         for secret_id, backend in sorted(keychain_report.items()):
             print(f"Secret {secret_id} -> {backend}")
-    print_setup_next_steps(args.bundle, ingress_owner, setup_state["llm"])
+    print_setup_next_steps(
+        args.bundle,
+        ingress_owner,
+        setup_state["llm"],
+        setup_state,
+        start_now=start_now,
+        start_ok=start_ok,
+        autostart_enabled=bool(getattr(args, "autostart", True)),
+    )
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
     ensure_state_dirs()
     if not telegram_profile_is_default(getattr(args, "profile", None)):
         return configure_telegram_profile(args)
-    plan = resolve_setup_bundle_plan(args)
-    interactive = setup_is_interactive(args)
-    if interactive:
-        print_setup_preflight(plan.bundle)
-    secret_values, setup_state = collect_setup_configuration(
-        args,
-        plan.bundle,
-        plan.ingress_owner,
-        interactive,
-    )
-    validate_new_telegram_bot_tokens(args, secret_values)
-    save_json(CONFIG_PATH, setup_state)
-    install_setup_bundle(args, plan.bundle, plan.installed_modules)
-    install_memory_sidecar_dependencies(args, plan.modules, setup_state)
-    builder_notes, keychain_report = write_setup_runtime_config(
-        args,
-        plan.modules,
-        plan.bundle,
-        secret_values,
-        setup_state,
-    )
-    print_setup_summary(args, plan.ingress_owner, builder_notes, keychain_report, setup_state)
-    if getattr(args, "autostart", True):
+    setup_state: dict[str, Any] | None = None
+    pending = load_pending_setup_state() if getattr(args, "resume", False) else {}
+    if pending:
+        pending_bundle = str(pending.get("bundle") or "").strip()
+        if pending_bundle and getattr(args, "bundle", "telegram-starter") == "telegram-starter":
+            setattr(args, "bundle", pending_bundle)
+        print("Resuming pending Spark setup.")
+        print(f"Last stop: {pending.get('detail') or pending.get('stage') or 'unknown'}")
+    try:
+        plan = resolve_setup_bundle_plan(args)
+        interactive = setup_is_interactive(args)
+        if interactive:
+            print("")
+            print("Spark is waking up.")
+            print_setup_preflight(plan.bundle)
+        secret_values, setup_state = collect_setup_configuration(
+            args,
+            plan.bundle,
+            plan.ingress_owner,
+            interactive,
+        )
+        setattr(args, "onboarding_session", setup_state.get("onboarding_session"))
+        validate_new_telegram_bot_tokens(args, secret_values)
+        save_json(CONFIG_PATH, setup_state)
+        install_setup_bundle(args, plan.bundle, plan.installed_modules)
+        install_memory_sidecar_dependencies(args, plan.modules, setup_state)
+        builder_notes, keychain_report = write_setup_runtime_config(
+            args,
+            plan.modules,
+            plan.bundle,
+            secret_values,
+            setup_state,
+        )
+        clear_pending_setup_state()
+        start_now = bool(getattr(args, "start_now", True))
+        start_ok = False
+        if getattr(args, "autostart", True):
+            print("")
+            if start_now:
+                print("Installing login autostart and starting Spark now.")
+            else:
+                print("Installing login autostart. Turn it off with: spark autostart off")
+            start_ok = cmd_autostart_install(argparse.Namespace(target=args.bundle, now=start_now)) == 0
+        elif start_now:
+            print("")
+            print("Starting Spark now.")
+            start_ok = cmd_start(argparse.Namespace(target=args.bundle, profile=None)) == 0
+        print_setup_summary(
+            args,
+            plan.ingress_owner,
+            builder_notes,
+            keychain_report,
+            setup_state,
+            start_now=start_now,
+            start_ok=start_ok,
+        )
+        first_message_ok = True
+        wait_seconds = first_message_wait_seconds(args, interactive)
+        if start_now and start_ok and wait_seconds:
+            print("")
+            print("Waiting for Spark to hear you in Telegram...")
+            result = wait_for_telegram_first_message(str(setup_state.get("onboarding_session") or ""), wait_seconds)
+            print_first_message_wait_result(result)
+            maybe_offer_first_message_repair(result, interactive)
+            first_message_ok = bool(result.get("received") and result.get("replied"))
+        return 0 if ((start_ok or not start_now) and first_message_ok) else 1
+    except SystemExit as exc:
+        detail = str(exc)
+        save_pending_setup_state("setup", detail, setup_state)
+        print_setup_failure_truth_screen(detail)
+        raise
+
+
+def cmd_onboard(args: argparse.Namespace) -> int:
+    ensure_state_dirs()
+    pending = load_pending_setup_state()
+    setup_state = load_json(CONFIG_PATH, {})
+    installed = load_json(REGISTRY_PATH, {})
+    bundle = str(getattr(args, "bundle", None) or pending.get("bundle") or setup_state.get("bundle") or "telegram-starter")
+    setup_needed = bool(pending) or not CONFIG_PATH.exists() or not isinstance(installed, dict) or not installed
+
+    if setup_needed:
+        setup_argv = ["setup", bundle, "--resume"]
+        setup_argv.append("--start-now" if getattr(args, "start_now", True) else "--no-start-now")
+        setup_argv.append("--autostart" if getattr(args, "autostart", True) else "--no-autostart")
+        if getattr(args, "non_interactive", False):
+            setup_argv.append("--non-interactive")
+        if not getattr(args, "wait_first_message", True):
+            setup_argv.append("--no-wait-first-message")
+        elif getattr(args, "wait_first_message_seconds", None) is not None:
+            setup_argv.extend(["--wait-first-message-seconds", str(args.wait_first_message_seconds)])
+        print("Spark onboard is resuming setup.")
+        return cmd_setup(build_parser().parse_args(setup_argv))
+
+    print("Spark onboard")
+    print(f"Bundle: {bundle}")
+    start_ok = True
+    if getattr(args, "start_now", True):
+        print("Starting Spark now.")
+        start_ok = cmd_start(argparse.Namespace(target=bundle, profile=None, allow_boot_warnings=False, allow_dirty_runtime=False)) == 0
+
+    session = str(setup_state.get("onboarding_session") or new_onboarding_session_code()) if isinstance(setup_state, dict) else new_onboarding_session_code()
+    if isinstance(setup_state, dict) and setup_state.get("onboarding_session") != session:
+        setup_state["onboarding_session"] = session
+        save_json(CONFIG_PATH, setup_state)
+    print("")
+    print("Open Telegram and send:")
+    print(f"  /start {session}")
+    print("")
+    print("Checks:")
+    print("  spark verify --onboarding")
+    print("  spark fix telegram")
+
+    first_message_ok = True
+    wait_seconds = first_message_wait_seconds(args, setup_is_interactive(args))
+    if start_ok and wait_seconds:
         print("")
-        print("Installing login autostart (default). Turn it off with: spark autostart off")
-        cmd_autostart_install(argparse.Namespace(target=args.bundle, now=True))
-    return 0
+        print("Waiting for Spark to hear you in Telegram...")
+        result = wait_for_telegram_first_message(session, wait_seconds)
+        print_first_message_wait_result(result)
+        maybe_offer_first_message_repair(result, setup_is_interactive(args))
+        first_message_ok = bool(result.get("received") and result.get("replied"))
+    return 0 if start_ok and first_message_ok else 1
 
 
 def persist_keychain_secrets(bundle: list[Module], secret_values: dict[str, str]) -> dict[str, str]:
@@ -5486,6 +5865,166 @@ def dependency_lockfile_errors() -> list[str]:
     return errors
 
 
+def requirement_line_is_pinned(line: str) -> bool:
+    raw = line.split("#", 1)[0].strip()
+    if not raw:
+        return True
+    if raw.startswith(("-r ", "--requirement ", "-c ", "--constraint ")):
+        return True
+    if raw.startswith(("--index-url", "--extra-index-url", "--find-links", "--trusted-host")):
+        return True
+    if raw.startswith("-e "):
+        return raw.startswith(("-e .", "-e ./", "-e ../")) or re.search(r"@[0-9a-fA-F]{7,40}\b", raw) is not None
+    if raw.startswith(("git+", "http://", "https://")):
+        return re.search(r"@[0-9a-fA-F]{7,40}\b", raw) is not None
+    if " @ " in raw:
+        return True
+    return "==" in raw
+
+
+def dependency_pin_errors() -> list[str]:
+    installed = load_json(REGISTRY_PATH, {})
+    errors: list[str] = []
+    if not isinstance(installed, dict):
+        return errors
+    for name, record in sorted(installed.items()):
+        if not isinstance(record, dict):
+            continue
+        path = Path(str(record.get("path") or "")).expanduser()
+        requirements_path = path / "requirements.txt"
+        if not requirements_path.exists():
+            continue
+        try:
+            lines = requirements_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            errors.append(f"Python module `{name}` requirements.txt could not be read.")
+            continue
+        unpinned = [
+            line.split("#", 1)[0].strip()
+            for line in lines
+            if line.split("#", 1)[0].strip() and not requirement_line_is_pinned(line)
+        ]
+        if unpinned:
+            errors.append(
+                f"Python module `{name}` has unpinned requirements: {', '.join(unpinned[:5])}."
+            )
+    return errors
+
+
+NODE_LOCKFILES = ("package-lock.json", "npm-shrinkwrap.json")
+
+
+def package_json_dependency_maps(payload: Any) -> dict[str, dict[str, str]]:
+    if not isinstance(payload, dict):
+        return {}
+    maps: dict[str, dict[str, str]] = {}
+    for key in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+        raw = payload.get(key)
+        if isinstance(raw, dict):
+            maps[key] = {str(name): str(spec) for name, spec in raw.items()}
+    return maps
+
+
+def package_dependency_spec_is_commit_pinned(spec: str) -> bool:
+    raw = str(spec or "").strip()
+    if not raw:
+        return True
+    if raw.startswith(("file:", "link:", "workspace:")):
+        return True
+    if raw.startswith(("git+", "github:", "gitlab:", "bitbucket:")) or ".git#" in raw:
+        return re.search(r"#[0-9a-fA-F]{7,40}\b", raw) is not None
+    return True
+
+
+def dependency_lock_integrity_errors() -> list[str]:
+    installed = load_json(REGISTRY_PATH, {})
+    errors: list[str] = []
+    if not isinstance(installed, dict):
+        return errors
+    for name, record in sorted(installed.items()):
+        if not isinstance(record, dict):
+            continue
+        path = Path(str(record.get("path") or "")).expanduser()
+        package_json_path = path / "package.json"
+        if not package_json_path.exists():
+            continue
+        try:
+            package_json = json.loads(package_json_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            errors.append(f"Node module `{name}` package.json could not be read: {exc}.")
+            continue
+        dep_maps = package_json_dependency_maps(package_json)
+        for dep_name, spec in sorted({dep: spec for deps in dep_maps.values() for dep, spec in deps.items()}.items()):
+            if not package_dependency_spec_is_commit_pinned(spec):
+                errors.append(f"Node module `{name}` dependency `{dep_name}` uses an unpinned git/source spec.")
+
+        lock_path = next((path / lockfile for lockfile in NODE_LOCKFILES if (path / lockfile).exists()), None)
+        if lock_path is None:
+            continue
+        try:
+            lock_payload = json.loads(lock_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            errors.append(f"Node module `{name}` dependency lockfile could not be read: {exc}.")
+            continue
+        lock_version = lock_payload.get("lockfileVersion") if isinstance(lock_payload, dict) else None
+        if not isinstance(lock_version, int) or lock_version < 1:
+            errors.append(f"Node module `{name}` dependency lockfile has no valid lockfileVersion.")
+            continue
+        packages = lock_payload.get("packages") if isinstance(lock_payload, dict) else None
+        root_package = packages.get("") if isinstance(packages, dict) else None
+        legacy_deps = lock_payload.get("dependencies") if isinstance(lock_payload, dict) else None
+        for section, deps in dep_maps.items():
+            locked_root = root_package.get(section) if isinstance(root_package, dict) else None
+            for dep_name, spec in sorted(deps.items()):
+                root_spec = locked_root.get(dep_name) if isinstance(locked_root, dict) else None
+                if root_package is not None and root_spec != spec:
+                    errors.append(f"Node module `{name}` lockfile root entry is stale for `{dep_name}`.")
+                    continue
+                package_entry = packages.get(f"node_modules/{dep_name}") if isinstance(packages, dict) else None
+                legacy_entry = legacy_deps.get(dep_name) if isinstance(legacy_deps, dict) else None
+                if package_entry is None and legacy_entry is None:
+                    errors.append(f"Node module `{name}` lockfile is missing resolved entry for `{dep_name}`.")
+    return errors
+
+
+def requirement_file_enables_hash_mode(lines: list[str]) -> bool:
+    return any("--require-hashes" in line.split("#", 1)[0] for line in lines)
+
+
+def requirement_line_needs_hash(line: str) -> bool:
+    raw = line.split("#", 1)[0].strip()
+    if not raw:
+        return False
+    if raw.startswith(("-r ", "--requirement ", "-c ", "--constraint ")):
+        return False
+    if raw.startswith(("--index-url", "--extra-index-url", "--find-links", "--trusted-host", "--require-hashes")):
+        return False
+    return "--hash=" not in raw
+
+
+def dependency_hash_mode_errors() -> list[str]:
+    installed = load_json(REGISTRY_PATH, {})
+    errors: list[str] = []
+    if not isinstance(installed, dict):
+        return errors
+    for name, record in sorted(installed.items()):
+        if not isinstance(record, dict):
+            continue
+        requirements_path = Path(str(record.get("path") or "")).expanduser() / "requirements.txt"
+        if not requirements_path.exists():
+            continue
+        try:
+            lines = requirements_path.read_text(encoding="utf-8").splitlines()
+        except OSError:
+            continue
+        if not requirement_file_enables_hash_mode(lines):
+            continue
+        unhashed = [line.split("#", 1)[0].strip() for line in lines if requirement_line_needs_hash(line)]
+        if unhashed:
+            errors.append(f"Python module `{name}` uses --require-hashes but has unhashed requirements: {', '.join(unhashed[:5])}.")
+    return errors
+
+
 def endpoint_security_errors() -> list[str]:
     errors: list[str] = []
     provider_payload = provider_status_payload()
@@ -5559,7 +6098,7 @@ def runtime_env_contract_errors(modules: dict[str, Module] | None = None) -> lis
 def agency_guardrail_errors() -> list[str]:
     errors: list[str] = []
     if str(os.environ.get("SPARK_ALLOW_HOSTED_FULL_ACCESS") or "").strip().lower() in {"1", "true", "yes", "on"}:
-        errors.append("SPARK_ALLOW_HOSTED_FULL_ACCESS is enabled; hosted full access should stay off unless privately approval-gated.")
+        errors.append("SPARK_ALLOW_HOSTED_FULL_ACCESS is enabled; hosted access level 4 should stay off unless privately approval-gated.")
     return errors
 
 
@@ -5575,6 +6114,33 @@ def audit_visibility_errors() -> list[str]:
         if raw_log_path and not Path(raw_log_path).exists():
             errors.append(f"Tracked process `{key}` points at missing log file.")
     return errors
+
+
+def pending_setup_errors() -> list[str]:
+    if not SETUP_PENDING_PATH.exists():
+        return []
+    pending = load_pending_setup_state()
+    if not pending:
+        return ["Pending setup marker exists but could not be read."]
+    stage = str(pending.get("stage") or "unknown")
+    detail = str(pending.get("detail") or "no stop reason recorded")
+    return [f"Pending setup stopped at {stage}: {detail}"]
+
+
+def autostart_runtime_errors() -> list[str]:
+    profiles = autostart_telegram_profiles()
+    if not profiles:
+        return []
+    installed = load_json(REGISTRY_PATH, {})
+    setup_state = load_json(CONFIG_PATH, {})
+    installed_names = set(installed.keys()) if isinstance(installed, dict) else set()
+    expected = expected_runtime_process_names(installed_names, setup_state if isinstance(setup_state, dict) else {})
+    if not expected:
+        return [f"Telegram autostart profiles are enabled ({', '.join(profiles)}), but no runtime process is expected."]
+    ok, detail = process_runtime_detail(load_pids(), expected)
+    if ok:
+        return []
+    return [f"Autostart profiles enabled ({', '.join(profiles)}), but runtime is not live: {detail}"]
 
 
 def collect_security_audit_payload(*, deep: bool = False, hosted: bool = False) -> dict[str, Any]:
@@ -5655,6 +6221,26 @@ def collect_security_audit_payload(*, deep: bool = False, hosted: bool = False) 
         severity="medium",
     ))
 
+    pending_errors = pending_setup_errors()
+    checks.append(security_check(
+        "pending_setup_state",
+        not pending_errors,
+        "No interrupted setup state is pending." if not pending_errors else "; ".join(pending_errors[:3]),
+        "Run `spark onboard` or `spark setup telegram-starter --resume`.",
+        severity="medium",
+    ))
+
+    autostart_errors = autostart_runtime_errors()
+    checks.append(security_check(
+        "autostart_runtime",
+        not autostart_errors,
+        "Autostart profiles are either disabled or backed by live supervised runtime processes."
+        if not autostart_errors
+        else "; ".join(autostart_errors[:3]),
+        "Run `spark autostart on --now`, then `spark live status`.",
+        severity="medium",
+    ))
+
     supply_chain_errors = module_supply_chain_errors()
     checks.append(security_check(
         "module_supply_chain",
@@ -5684,6 +6270,35 @@ def collect_security_audit_payload(*, deep: bool = False, hosted: bool = False) 
         not lockfile_errors,
         "Installed modules have dependency lockfiles or requirements where expected." if not lockfile_errors else "; ".join(lockfile_errors[:6]),
         "Add lockfiles/requirements for affected modules before publishing or pinning a release.",
+        severity="medium",
+    ))
+
+    pin_errors = dependency_pin_errors()
+    checks.append(security_check(
+        "dependency_pins",
+        not pin_errors,
+        "Python requirements are pinned where requirements.txt is used." if not pin_errors else "; ".join(pin_errors[:6]),
+        "Pin affected requirements to exact versions or immutable source refs before publishing.",
+        severity="medium",
+    ))
+
+    lock_integrity_errors = dependency_lock_integrity_errors()
+    checks.append(security_check(
+        "dependency_lock_integrity",
+        not lock_integrity_errors,
+        "Node dependency lockfiles match package manifests and git/source specs are commit-pinned."
+        if not lock_integrity_errors
+        else "; ".join(lock_integrity_errors[:6]),
+        "Regenerate lockfiles with the intended package manager and pin git/source dependencies to immutable commits.",
+        severity="medium",
+    ))
+
+    hash_mode_errors = dependency_hash_mode_errors()
+    checks.append(security_check(
+        "dependency_hash_mode",
+        not hash_mode_errors,
+        "Python --require-hashes files hash every install requirement." if not hash_mode_errors else "; ".join(hash_mode_errors[:6]),
+        "Add --hash entries for every requirement or remove --require-hashes until the file is fully hashed.",
         severity="medium",
     ))
 
@@ -10363,10 +10978,10 @@ def onboarding_guide_payload() -> dict[str, Any]:
             "Then run: spark start spark-telegram-bot --profile qa-bot",
         ],
         "access_levels": [
-            {"level": "1", "name": "Chat Only", "use": "Conversation, memory, recall, and diagnostics. No Spawner builds."},
-            {"level": "2", "name": "Build When Asked", "use": "Spark can use Spawner only when you clearly ask it to build or run a mission."},
-            {"level": "3", "name": "Research + Build", "use": "Default. Adds public links, docs, and GitHub research. Spark can still build when you ask."},
-            {"level": "4", "name": "Full Access", "use": "Adds operating-system access for local project builds, debugging, repo inspection, and deeper missions. Destructive actions still need explicit approval."},
+            {"level": "1", "about": "Chat, memory, recall, and diagnostics. No Spawner builds."},
+            {"level": "2", "about": "Requested builds and missions. Spark only starts Spawner after you clearly ask."},
+            {"level": "3", "about": "Default. Public links, docs, and GitHub research, plus requested builds."},
+            {"level": "4", "about": "Local projects, files, debugging, repo inspection, and deeper missions. Destructive actions still need explicit approval."},
         ],
         "telegram_commands": [
             { "command": "/start", "use": "Show the basic command surface." },
@@ -10397,6 +11012,7 @@ def onboarding_guide_payload() -> dict[str, Any]:
             { "command": "spark autostart status", "use": "Check whether login autostart is installed and points at the current Spark home." },
             { "command": "spark autostart profile <profile> off", "use": "Keep one Telegram bot profile manual while the rest of Spark can still start at login." },
             { "command": "spark autostart off", "use": "Remove OS login autostart while leaving Spark installed." },
+            { "command": "spark onboard", "use": "Resume setup, start Spark, and wait for the first Telegram /start bridge." },
             { "command": "spark logs spark-telegram-bot", "use": "Read Telegram gateway logs." },
             { "command": "spark logs spark-telegram-bot --profile qa-bot", "use": "Read logs for a named Telegram bot profile." },
             { "command": "spark logs spawner-ui", "use": "Read mission-control logs." },
@@ -10407,6 +11023,7 @@ def onboarding_guide_payload() -> dict[str, Any]:
             { "command": "spark list", "use": "List local Spark modules with manifests." },
             { "command": "spark install <target>", "use": "Install a module by registry name, local path, or git URL." },
             { "command": "spark setup [bundle]", "use": "Configure a starter bundle; installs login autostart by default unless --no-autostart is passed." },
+            { "command": "spark onboard [bundle]", "use": "Resume setup or restart onboarding until the Telegram first-message bridge is confirmed." },
             { "command": "spark status [--json]", "use": "Run module healthchecks with repair hints." },
             { "command": "spark doctor [--json]", "use": "Run diagnostic status output." },
             { "command": "spark doctor llm \"<problem>\"", "use": "Ask the configured LLM for a redacted repair plan." },
@@ -10487,7 +11104,7 @@ def cmd_guide(args: argparse.Namespace) -> int:
         print("")
         print("Access levels")
         for item in payload["access_levels"]:
-            print(f"   Level {item['level']} - {item['name']}: {item['use']}")
+            print(f"   Level {item['level']}: {item['about']}")
         print("   Change it in Telegram with /access <1|2|3|4>.")
         print("")
         print("How the modules work together")
@@ -10558,6 +11175,41 @@ def build_parser() -> argparse.ArgumentParser:
         dest="autostart",
         action="store_false",
         help="Keep Spark manual after setup; you can enable it later with `spark autostart on --now`",
+    )
+    setup_parser.set_defaults(autostart=True)
+    setup_start_group = setup_parser.add_mutually_exclusive_group()
+    setup_start_group.add_argument(
+        "--start-now",
+        dest="start_now",
+        action="store_true",
+        help="Start Spark immediately after configuration (default)",
+    )
+    setup_start_group.add_argument(
+        "--no-start-now",
+        dest="start_now",
+        action="store_false",
+        help="Configure Spark without starting it after setup",
+    )
+    setup_parser.set_defaults(start_now=True)
+    setup_wait_group = setup_parser.add_mutually_exclusive_group()
+    setup_wait_group.add_argument(
+        "--wait-first-message",
+        dest="wait_first_message",
+        action="store_true",
+        default=True,
+        help="After starting Spark interactively, wait for the first Telegram /start message (default for terminals)",
+    )
+    setup_wait_group.add_argument(
+        "--no-wait-first-message",
+        dest="wait_first_message",
+        action="store_false",
+        help="Do not wait for the first Telegram message after setup",
+    )
+    setup_parser.add_argument(
+        "--wait-first-message-seconds",
+        type=int,
+        default=None,
+        help="Override how long setup waits for the first Telegram /start message; default is 60 seconds for interactive terminals and 0 for non-interactive runs",
     )
     setup_parser.add_argument("--secret", action="append", help="Provide manifest secret values as key=value; use @clipboard, @env:NAME, or @file:path for secret input")
     setup_parser.add_argument("--bot-token", help="Telegram BotFather token, @clipboard, @env:NAME, or @file:path")
@@ -10633,6 +11285,21 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--ollama-model", default="llama3.2:3b")
     setup_parser.add_argument("--codex-model", default="gpt-5.5")
     setup_parser.set_defaults(func=cmd_setup)
+
+    onboard_parser = subparsers.add_parser("onboard", help="Resume setup, start Spark, and finish Telegram first-message onboarding")
+    onboard_parser.add_argument("bundle", nargs="?", help="Bundle to onboard (default: pending setup bundle, configured bundle, or telegram-starter)")
+    onboard_parser.add_argument("--non-interactive", action="store_true", help="Do not prompt while resuming setup")
+    onboard_autostart_group = onboard_parser.add_mutually_exclusive_group()
+    onboard_autostart_group.add_argument("--autostart", dest="autostart", action="store_true", default=True, help="Install or preserve login autostart while resuming setup")
+    onboard_autostart_group.add_argument("--no-autostart", dest="autostart", action="store_false", help="Keep Spark manual while resuming setup")
+    onboard_start_group = onboard_parser.add_mutually_exclusive_group()
+    onboard_start_group.add_argument("--start-now", dest="start_now", action="store_true", default=True, help="Start Spark now (default)")
+    onboard_start_group.add_argument("--no-start-now", dest="start_now", action="store_false", help="Show onboarding steps without starting Spark")
+    onboard_wait_group = onboard_parser.add_mutually_exclusive_group()
+    onboard_wait_group.add_argument("--wait-first-message", dest="wait_first_message", action="store_true", default=True, help="Wait for the first Telegram /start message when interactive")
+    onboard_wait_group.add_argument("--no-wait-first-message", dest="wait_first_message", action="store_false", help="Do not wait for the first Telegram message")
+    onboard_parser.add_argument("--wait-first-message-seconds", type=int, default=None, help="Override the first-message wait timeout")
+    onboard_parser.set_defaults(func=cmd_onboard)
 
     status_parser = subparsers.add_parser("status", help="Run module healthchecks")
     status_parser.add_argument("--json", action="store_true")
