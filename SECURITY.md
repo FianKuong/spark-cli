@@ -31,6 +31,21 @@ Before a launch or demo:
    webhook env is configured.
 5. Rotate any real token that was pasted into a chat, log, or terminal transcript.
 
+## Panic Revocation
+
+If you suspect local Spark credentials or control-plane keys leaked, run:
+
+```bash
+spark security revoke-all
+```
+
+This stops tracked Spark processes, disables login autostart, rotates generated
+local bridge/API keys, disables custom MCP configs, clears Telegram webhook
+state where a bot token is available, removes Spark-managed local secrets,
+pauses local mission state, and writes a redacted support bundle. Provider-side
+tokens still need revocation in BotFather, GitHub, Scanner, or the relevant API
+console when applicable.
+
 ## Threat Model
 
 Spark installs and runs local agent tooling. Treat every connected LLM, browser,
