@@ -5,6 +5,7 @@ import base64
 import ctypes
 import getpass
 import hashlib
+import io
 import ipaddress
 import json
 import os
@@ -22,7 +23,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import zipfile
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -1825,6 +1826,9 @@ def collect_secret_values(
             secret_values.setdefault(key, resolved_value)
 
     requirements = collect_secret_requirements(modules)
+    if getattr(args, "external_telegram_ingress", False):
+        requirements.pop("telegram.bot_token", None)
+        requirements.pop("telegram.admin_ids", None)
     for secret_id in requirements:
         if secret_id in secret_values:
             continue
@@ -4319,6 +4323,42 @@ def detect_uninstall_blockers(removing_modules: list[Module], installed_modules:
 
 
 def evaluate_module_health(module: Module) -> dict[str, Any]:
+    runtime_env = module_runtime_env(module)
+    if module.name == "spawner-ui" and spawner_should_use_liveness_endpoint(runtime_env):
+        health_url = spawner_runtime_health_url(module, runtime_env)
+        failure_hint = str(module.manifest.get("healthcheck", {}).get("failure_hint", "")).strip() or None
+        success_hint = str(module.manifest.get("healthcheck", {}).get("success_hint", "")).strip() or None
+        try:
+            request = urllib.request.Request(health_url, headers=ready_check_headers(health_url))
+            with urllib.request.urlopen(request, timeout=ready_timeout_seconds(module)) as response:
+                healthy = 200 <= int(response.status) < 300
+                detail = f"Spawner UI live health {'OK' if healthy else 'failed'}: HTTP {response.status}"
+        except Exception as exc:
+            healthy = False
+            detail = f"Spawner UI live health failed: {exc}"
+        return {
+            "name": module.name,
+            "version": module.version,
+            "kind": module.kind,
+            "plane": module.plane,
+            "healthy": healthy,
+            "detail": detail,
+            "healthcheck_command": f"GET {health_url}",
+            "failure_hint": failure_hint,
+            "success_hint": success_hint,
+        }
+    if module.name == "spark-telegram-bot" and telegram_ingress_is_external():
+        return {
+            "name": module.name,
+            "version": module.version,
+            "kind": module.kind,
+            "plane": module.plane,
+            "healthy": True,
+            "detail": "Telegram ingress is external; this Spark Live runtime does not store or poll the bot token.",
+            "healthcheck_command": None,
+            "failure_hint": None,
+            "success_hint": "External Telegram ingress owner is expected to run its own healthcheck.",
+        }
     command = module.healthcheck_command
     if not command:
         return {
@@ -4332,7 +4372,7 @@ def evaluate_module_health(module: Module) -> dict[str, Any]:
             "failure_hint": None,
         }
     timeout_seconds = ready_timeout_seconds(module)
-    result = run_runtime_command(command, module.path, env=module_runtime_env(module), timeout=timeout_seconds)
+    result = run_runtime_command(command, module.path, env=runtime_env, timeout=timeout_seconds)
     detail = summarize_command_output(result)
     failure_hint = str(module.manifest.get("healthcheck", {}).get("failure_hint", "")).strip() or None
     success_hint = str(module.manifest.get("healthcheck", {}).get("success_hint", "")).strip() or None
@@ -4728,10 +4768,23 @@ def collect_setup_configuration(
     preserved_profiles = existing_setup.get("telegram_profiles") if isinstance(existing_setup, dict) else None
     preserved_primary_profile = existing_setup.get(PRIMARY_TELEGRAM_PROFILE_KEY) if isinstance(existing_setup, dict) else None
     preserved_onboarding_session = existing_setup.get("onboarding_session") if isinstance(existing_setup, dict) else None
+    if getattr(args, "external_telegram_ingress", False):
+        stale_telegram_secret_ids = {
+            key
+            for key in preserved_secret_keys | set(secret_values.keys())
+            if key in {"telegram.bot_token", "telegram.admin_ids"}
+            or (key.startswith("telegram.profiles.") and key.endswith(".bot_token"))
+        }
+        for secret_id in stale_telegram_secret_ids:
+            delete_secret(secret_id)
+        preserved_secret_keys.difference_update(stale_telegram_secret_ids)
+        preserved_profiles = None
+        preserved_primary_profile = None
     setup_state = {
         "bundle": args.bundle,
         "modules": [module.name for module in bundle],
         "telegram_ingress_owner": ingress_owner.name,
+        "telegram_ingress_mode": "external" if getattr(args, "external_telegram_ingress", False) else "local",
         "configured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "secret_keys": sorted(preserved_secret_keys | set(secret_values.keys())),
         "llm": llm_setup_state(llm_provider, llm_env),
@@ -4874,7 +4927,10 @@ def print_setup_summary(
     print("Spark setup complete.")
     print(f"Bundle: {args.bundle}")
     print(f"Telegram ingress owner: {ingress_owner.name}")
-    print("Bot token routed only to spark-telegram-bot.")
+    if getattr(args, "external_telegram_ingress", False):
+        print("Telegram ingress mode: external; no bot token stored in this Spark Live runtime.")
+    else:
+        print("Bot token routed only to spark-telegram-bot.")
     print(f"Generated module config dir: {MODULE_CONFIG_DIR}")
     for note in builder_notes:
         print(f"Builder runtime: {note}")
@@ -5324,7 +5380,7 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_live(args: argparse.Namespace) -> int:
     command = getattr(args, "live_command", "status")
     if command in {"start", "run"}:
-        args.target = "telegram-starter"
+        args.target = live_runtime_target()
         args.profile = DEFAULT_TELEGRAM_PROFILE
         args.allow_boot_warnings = False
         start_code = cmd_start(args)
@@ -5336,12 +5392,12 @@ def cmd_live(args: argparse.Namespace) -> int:
             follow_live_logs(lines=getattr(args, "lines", 80))
         return start_code
     if command == "stop":
-        args.target = "telegram-starter"
+        args.target = live_runtime_target()
         args.profile = DEFAULT_TELEGRAM_PROFILE
         args.cascade = True
         return cmd_stop(args)
     if command == "restart":
-        args.target = "telegram-starter"
+        args.target = live_runtime_target()
         args.profile = DEFAULT_TELEGRAM_PROFILE
         args.cascade = True
         args.allow_boot_warnings = False
@@ -5372,9 +5428,20 @@ def cmd_live(args: argparse.Namespace) -> int:
     raise SystemExit(f"Unknown live command: {command}")
 
 
+def telegram_ingress_is_external(setup_state: dict[str, Any] | None = None) -> bool:
+    setup = setup_state if isinstance(setup_state, dict) else load_json(CONFIG_PATH, {})
+    return isinstance(setup, dict) and setup.get("telegram_ingress_mode") == "external"
+
+
+def live_runtime_target() -> str:
+    return "spawner-ui" if telegram_ingress_is_external() else "telegram-starter"
+
+
 def live_log_targets() -> list[tuple[str, Path]]:
     targets: list[tuple[str, Path]] = [("spawner-ui", module_log_path("spawner-ui"))]
     setup_state = load_json(CONFIG_PATH, {})
+    if telegram_ingress_is_external(setup_state):
+        return targets
     profiles = setup_state.get("telegram_profiles") if isinstance(setup_state, dict) else None
     if isinstance(profiles, dict) and profiles:
         for profile in sorted(profiles):
@@ -5556,6 +5623,530 @@ def cmd_support(args: argparse.Namespace) -> int:
     print("Useful next:")
     print(f"  spark doctor llm \"Describe the Spark issue\" --save-report")
     return 0
+
+
+REVOKE_ALL_ROTATABLE_ENV_KEYS = {
+    "EVENTS_API_KEY",
+    "MCP_API_KEY",
+    "SPARK_BRIDGE_API_KEY",
+    "SPARK_UI_API_KEY",
+    "TELEGRAM_RELAY_SECRET",
+}
+REVOKE_ALL_SPAWNER_REQUIRED_KEYS = {
+    "EVENTS_API_KEY",
+    "MCP_API_KEY",
+    "SPARK_BRIDGE_API_KEY",
+    "SPARK_UI_API_KEY",
+}
+REVOKE_ALL_NON_TERMINAL_PROVIDER_STATUSES = {"idle", "queued", "running"}
+REVOKE_ALL_TERMINAL_MISSION_EVENTS = {"mission_completed", "mission_failed", "mission_cancelled"}
+REVOKE_ALL_PAUSABLE_MISSION_EVENTS = {
+    "mission_created",
+    "mission_started",
+    "mission_resumed",
+    "task_started",
+    "task_progress",
+    "progress",
+    "task_completed",
+    "task_failed",
+    "task_cancelled",
+    "dispatch_started",
+    "provider_feedback",
+    "log",
+}
+
+
+def revoke_all_error_detail(error: BaseException) -> str:
+    return redact_shareable_text(redact_sensitive_text(f"{error.__class__.__name__}: {error}"))
+
+
+def revoke_all_token_value(key: str) -> str:
+    prefix = key.lower().replace("_", "-")
+    return f"spark-{prefix}-{py_secrets.token_urlsafe(32)}"
+
+
+def capture_revoke_all_step(label: str, callback: Callable[[], int], *, dry_run: bool = False) -> dict[str, Any]:
+    if dry_run:
+        return {"ok": True, "label": label, "planned": True, "exit_code": None, "output": ""}
+    output = io.StringIO()
+    try:
+        with redirect_stdout(output):
+            exit_code = int(callback())
+    except Exception as error:
+        return {
+            "ok": False,
+            "label": label,
+            "planned": False,
+            "exit_code": None,
+            "output": redact_shareable_text(output.getvalue().strip()),
+            "error": revoke_all_error_detail(error),
+        }
+    return {
+        "ok": True,
+        "label": label,
+        "planned": False,
+        "exit_code": exit_code,
+        "output": redact_shareable_text(output.getvalue().strip()),
+    }
+
+
+def generated_env_files_for_revoke_all() -> list[Path]:
+    if not MODULE_CONFIG_DIR.exists():
+        return []
+    try:
+        return sorted(path for path in MODULE_CONFIG_DIR.glob("*.env") if path.is_file())
+    except OSError:
+        return []
+
+
+def module_name_from_generated_env_path(path: Path) -> str | None:
+    stem = path.stem
+    if "." in stem:
+        return None
+    return stem
+
+
+def resolve_installed_modules_best_effort() -> dict[str, Module]:
+    try:
+        return resolve_installed_modules()
+    except Exception:
+        return {}
+
+
+def sync_generated_env_to_module_output(
+    generated_path: Path,
+    values: dict[str, str],
+    installed_modules: dict[str, Module],
+) -> str | None:
+    module_name = module_name_from_generated_env_path(generated_path)
+    if not module_name:
+        return None
+    module = installed_modules.get(module_name)
+    if module is None:
+        return None
+    env_path = module_env_path(module)
+    if env_path is None:
+        return None
+    update_env_file(env_path, values)
+    return str(env_path)
+
+
+def rotate_revoke_all_env_keys(*, dry_run: bool = False) -> dict[str, Any]:
+    rotated_files: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    generated_values: dict[str, str] = {}
+    installed_modules = resolve_installed_modules_best_effort()
+
+    for path in generated_env_files_for_revoke_all():
+        values = read_generated_env(path)
+        keys = {key for key in REVOKE_ALL_ROTATABLE_ENV_KEYS if key in values}
+        if path.name == "spawner-ui.env":
+            keys.update(REVOKE_ALL_SPAWNER_REQUIRED_KEYS)
+        if not keys:
+            continue
+        try:
+            next_values = dict(values)
+            for key in sorted(keys):
+                generated_values.setdefault(key, revoke_all_token_value(key))
+                next_values[key] = generated_values[key]
+            synced_env_path = None
+            if not dry_run:
+                write_generated_env(path, next_values)
+                synced_env_path = sync_generated_env_to_module_output(path, next_values, installed_modules)
+            rotated_files.append(
+                {
+                    "path": str(path),
+                    "keys": sorted(keys),
+                    "synced_module_env_path": synced_env_path,
+                    "planned": dry_run,
+                }
+            )
+        except Exception as error:
+            failures.append({"path": str(path), "error": revoke_all_error_detail(error)})
+
+    return {
+        "ok": not failures,
+        "rotated_files": rotated_files,
+        "rotated_key_names": sorted(generated_values),
+        "failures": failures,
+        "planned": dry_run,
+    }
+
+
+def disable_revoke_all_custom_mcp(*, dry_run: bool = False) -> dict[str, Any]:
+    spawner_env_path = MODULE_CONFIG_DIR / "spawner-ui.env"
+    if not spawner_env_path.exists():
+        return {
+            "ok": True,
+            "disabled": False,
+            "planned": dry_run,
+            "detail": "No generated spawner-ui env file was present.",
+            "files": [],
+        }
+    try:
+        values = read_generated_env(spawner_env_path)
+        values["MCP_ALLOW_CUSTOM_CONFIG"] = "0"
+        synced_env_path = None
+        if not dry_run:
+            write_generated_env(spawner_env_path, values)
+            synced_env_path = sync_generated_env_to_module_output(
+                spawner_env_path,
+                values,
+                resolve_installed_modules_best_effort(),
+            )
+        return {
+            "ok": True,
+            "disabled": True,
+            "planned": dry_run,
+            "files": [
+                {
+                    "path": str(spawner_env_path),
+                    "synced_module_env_path": synced_env_path,
+                    "key": "MCP_ALLOW_CUSTOM_CONFIG",
+                    "value": "0",
+                }
+            ],
+        }
+    except Exception as error:
+        return {
+            "ok": False,
+            "disabled": False,
+            "planned": dry_run,
+            "files": [{"path": str(spawner_env_path)}],
+            "error": revoke_all_error_detail(error),
+        }
+
+
+def telegram_tokens_for_revoke_all(secret_ids: Iterable[str]) -> list[dict[str, str]]:
+    tokens: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for secret_id in sorted(secret_ids):
+        if not is_telegram_bot_token_secret(secret_id):
+            continue
+        value = fetch_secret(secret_id)
+        if not value:
+            continue
+        token = extract_telegram_bot_token(value)
+        if token in seen:
+            continue
+        seen.add(token)
+        tokens.append({"secret_id": secret_id, "token": token})
+    return tokens
+
+
+def clear_telegram_webhook_state(tokens: list[dict[str, str]], *, dry_run: bool = False) -> dict[str, Any]:
+    results: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
+    for item in tokens:
+        secret_id = item["secret_id"]
+        if dry_run:
+            results.append({"secret_id": secret_id, "ok": True, "planned": True})
+            continue
+        token = urllib.parse.quote(item["token"], safe=":")
+        url = f"https://api.telegram.org/bot{token}/deleteWebhook?drop_pending_updates=true"
+        request = urllib.request.Request(url, method="POST")
+        try:
+            with urllib.request.urlopen(request, timeout=TELEGRAM_BOT_TOKEN_TIMEOUT_SECONDS) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            ok = bool(payload.get("ok"))
+            entry: dict[str, Any] = {"secret_id": secret_id, "ok": ok, "planned": False}
+            if not ok:
+                entry["description"] = redact_sensitive_text(str(payload.get("description") or "Telegram rejected deleteWebhook"))
+                failures.append({"secret_id": secret_id, "error": str(entry["description"])})
+            results.append(entry)
+        except Exception as error:
+            detail = revoke_all_error_detail(error)
+            failures.append({"secret_id": secret_id, "error": detail})
+            results.append({"secret_id": secret_id, "ok": False, "planned": False, "error": detail})
+    return {
+        "ok": not failures,
+        "requested": len(tokens),
+        "results": results,
+        "failures": failures,
+        "planned": dry_run,
+    }
+
+
+def delete_revoke_all_secrets(secret_ids: Iterable[str], *, dry_run: bool = False) -> dict[str, Any]:
+    deleted: list[str] = []
+    failures: list[dict[str, str]] = []
+    for secret_id in sorted(secret_ids):
+        if dry_run:
+            deleted.append(secret_id)
+            continue
+        try:
+            delete_secret(secret_id)
+            deleted.append(secret_id)
+        except Exception as error:
+            failures.append({"secret_id": secret_id, "error": revoke_all_error_detail(error)})
+    external_markers = ("github", "scanner", "oauth", "access_token", "refresh_token")
+    external_ids = [secret_id for secret_id in deleted if any(marker in secret_id.lower() for marker in external_markers)]
+    return {
+        "ok": not failures,
+        "deleted_secret_ids": deleted,
+        "deleted_count": len(deleted),
+        "external_token_secret_ids": external_ids,
+        "failures": failures,
+        "planned": dry_run,
+        "remote_revoke_note": (
+            "Local Spark copies were removed. Revoke provider-side OAuth/GitHub/Scanner tokens in the provider console when applicable."
+            if external_ids
+            else ""
+        ),
+    }
+
+
+def spawner_state_dir_for_revoke_all() -> Path:
+    spawner_env = read_generated_env(MODULE_CONFIG_DIR / "spawner-ui.env")
+    raw = spawner_env.get("SPAWNER_STATE_DIR") or str(STATE_DIR / "spawner-ui")
+    return Path(raw).expanduser()
+
+
+def load_json_best_effort(path: Path, default: Any) -> Any:
+    try:
+        return load_json(path, default)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return default
+
+
+def latest_mission_events(recent: list[Any]) -> dict[str, dict[str, Any]]:
+    latest: dict[str, dict[str, Any]] = {}
+    for entry in recent:
+        if not isinstance(entry, dict):
+            continue
+        mission_id = entry.get("missionId")
+        event_type = entry.get("eventType")
+        if not isinstance(mission_id, str) or not mission_id.strip():
+            continue
+        if not isinstance(event_type, str) or not event_type.strip():
+            continue
+        latest.setdefault(mission_id.strip(), entry)
+    return latest
+
+
+def pause_entry_for_revoke_all(entry: dict[str, Any], timestamp: str) -> dict[str, Any]:
+    next_entry = dict(entry)
+    next_entry.update(
+        {
+            "eventType": "mission_paused",
+            "summary": "Mission paused by spark security revoke-all.",
+            "timestamp": timestamp,
+            "source": "spark-cli-security-revoke-all",
+        }
+    )
+    next_entry["taskId"] = None
+    next_entry["taskName"] = None
+    next_entry["progress"] = None
+    return next_entry
+
+
+def pause_revoke_all_missions(*, dry_run: bool = False, timestamp: str | None = None) -> dict[str, Any]:
+    created_at = timestamp or timestamp_now()
+    state_dir = spawner_state_dir_for_revoke_all()
+    active_path = state_dir / "active-mission.json"
+    mission_control_path = state_dir / "mission-control.json"
+    provider_results_path = state_dir / "mission-provider-results.json"
+    pause_marker_path = state_dir / "security-revoke-all.json"
+    paused_mission_ids: set[str] = set()
+    provider_results_cancelled = 0
+    failures: list[dict[str, str]] = []
+
+    mission_control = load_json_best_effort(mission_control_path, {})
+    recent = mission_control.get("recent") if isinstance(mission_control, dict) else None
+    if isinstance(recent, list):
+        latest = latest_mission_events(recent)
+        pause_entries: list[dict[str, Any]] = []
+        for mission_id, entry in latest.items():
+            event_type = str(entry.get("eventType") or "")
+            if event_type in REVOKE_ALL_TERMINAL_MISSION_EVENTS or event_type == "mission_paused":
+                continue
+            if event_type in REVOKE_ALL_PAUSABLE_MISSION_EVENTS:
+                paused_mission_ids.add(mission_id)
+                pause_entries.append(pause_entry_for_revoke_all(entry, created_at))
+        if pause_entries and not dry_run:
+            try:
+                mission_control["recent"] = [*pause_entries, *recent]
+                mission_control["totalRelayed"] = int(mission_control.get("totalRelayed") or 0) + len(pause_entries)
+                per_mission = mission_control.get("perMission")
+                if not isinstance(per_mission, dict):
+                    per_mission = {}
+                for entry in pause_entries:
+                    mission_id = str(entry.get("missionId") or "")
+                    per_mission[mission_id] = int(per_mission.get(mission_id) or 0) + 1
+                mission_control["perMission"] = per_mission
+                save_json(mission_control_path, mission_control)
+            except Exception as error:
+                failures.append({"path": str(mission_control_path), "error": revoke_all_error_detail(error)})
+
+    active = load_json_best_effort(active_path, {})
+    if isinstance(active, dict) and active:
+        mission_id = str(active.get("missionId") or active.get("id") or "").strip()
+        status = str(active.get("status") or "").strip().lower()
+        if mission_id and status not in {"completed", "failed", "cancelled", "paused"}:
+            paused_mission_ids.add(mission_id)
+            if not dry_run:
+                try:
+                    active["status"] = "paused"
+                    active["lastUpdated"] = created_at
+                    active["note"] = "Paused by spark security revoke-all"
+                    active["securityRevokeAll"] = {"pausedAt": created_at, "source": "spark-cli"}
+                    save_json(active_path, active)
+                except Exception as error:
+                    failures.append({"path": str(active_path), "error": revoke_all_error_detail(error)})
+
+    provider_results = load_json_best_effort(provider_results_path, {})
+    missions = provider_results.get("missions") if isinstance(provider_results, dict) else None
+    if isinstance(missions, dict):
+        changed = False
+        for mission_id, results in missions.items():
+            if not isinstance(results, list):
+                continue
+            for result in results:
+                if not isinstance(result, dict):
+                    continue
+                status = str(result.get("status") or "").lower()
+                if status in REVOKE_ALL_NON_TERMINAL_PROVIDER_STATUSES:
+                    paused_mission_ids.add(str(mission_id))
+                    provider_results_cancelled += 1
+                    changed = True
+                    if not dry_run:
+                        result["status"] = "cancelled"
+                        result["error"] = "Security revoke-all stopped runtime while pausing mission."
+                        result.setdefault("completedAt", created_at)
+        if changed and not dry_run:
+            try:
+                save_json(provider_results_path, provider_results)
+            except Exception as error:
+                failures.append({"path": str(provider_results_path), "error": revoke_all_error_detail(error)})
+
+    marker = {
+        "version": 1,
+        "created_at": created_at,
+        "pause_new_missions": True,
+        "custom_mcp_disabled": True,
+        "paused_mission_ids": sorted(paused_mission_ids),
+        "reason": "spark security revoke-all",
+    }
+    if not dry_run:
+        try:
+            save_json(pause_marker_path, marker)
+        except Exception as error:
+            failures.append({"path": str(pause_marker_path), "error": revoke_all_error_detail(error)})
+
+    return {
+        "ok": not failures,
+        "state_dir": str(state_dir),
+        "active_mission_path": str(active_path),
+        "mission_control_path": str(mission_control_path),
+        "provider_results_path": str(provider_results_path),
+        "pause_marker_path": str(pause_marker_path),
+        "paused_mission_ids": sorted(paused_mission_ids),
+        "provider_results_cancelled": provider_results_cancelled,
+        "planned": dry_run,
+        "failures": failures,
+    }
+
+
+def execute_security_revoke_all(*, dry_run: bool = False, include_logs: bool = False) -> dict[str, Any]:
+    ensure_state_dirs()
+    created_at = timestamp_now()
+    payload: dict[str, Any] = {
+        "ok": True,
+        "summary": "Spark revoke-all security response",
+        "created_at": created_at,
+        "dry_run": dry_run,
+        "actions": {},
+        "support_bundle_path": None,
+        "manual_remote_revocations": [
+            "Telegram bot tokens were removed locally; rotate or revoke the bot with BotFather if a token leaked.",
+            "OAuth/GitHub/Scanner tokens were removed locally when present; revoke them in their provider consoles when applicable.",
+            "Cloud/provider API keys outside Spark's local secret store still need provider-side rotation.",
+        ],
+    }
+
+    with pid_file_lock():
+        tracked_processes_before = sorted(load_pids().keys())
+    payload["actions"]["autostart"] = capture_revoke_all_step(
+        "Disable Spark login autostart",
+        lambda: cmd_autostart_uninstall(argparse.Namespace()),
+        dry_run=dry_run,
+    )
+    payload["actions"]["processes"] = {
+        **capture_revoke_all_step(
+            "Stop tracked Spark processes",
+            lambda: cmd_stop(argparse.Namespace(target=None, profile=None, cascade=True)),
+            dry_run=dry_run,
+        ),
+        "tracked_processes_before": tracked_processes_before,
+    }
+
+    secret_ids = sorted(list_stored_secrets())
+    telegram_tokens = telegram_tokens_for_revoke_all(secret_ids)
+    payload["actions"]["telegram"] = clear_telegram_webhook_state(telegram_tokens, dry_run=dry_run)
+    payload["actions"]["secrets"] = delete_revoke_all_secrets(secret_ids, dry_run=dry_run)
+    payload["actions"]["local_keys"] = rotate_revoke_all_env_keys(dry_run=dry_run)
+    payload["actions"]["custom_mcp"] = disable_revoke_all_custom_mcp(dry_run=dry_run)
+    payload["actions"]["missions"] = pause_revoke_all_missions(dry_run=dry_run, timestamp=created_at)
+
+    if not dry_run:
+        try:
+            support_payload = collect_support_bundle_payload(include_logs=include_logs, log_lines=120)
+            support_payload["revoke_all"] = redact_shareable_payload(
+                redact_for_llm({key: value for key, value in payload.items() if key != "support_bundle_path"})
+            )
+            support_path = write_support_bundle(support_payload)
+            payload["support_bundle_path"] = str(support_path)
+            payload["actions"]["support_bundle"] = {"ok": True, "path": str(support_path), "include_logs": include_logs}
+        except Exception as error:
+            payload["actions"]["support_bundle"] = {"ok": False, "error": revoke_all_error_detail(error)}
+    else:
+        payload["actions"]["support_bundle"] = {"ok": True, "planned": True, "path": None}
+
+    critical_actions = ("secrets", "local_keys", "custom_mcp", "missions", "support_bundle")
+    payload["ok"] = all(bool(payload["actions"].get(name, {}).get("ok")) for name in critical_actions)
+    return payload
+
+
+def print_security_revoke_all_payload(payload: dict[str, Any]) -> None:
+    dry_run = bool(payload.get("dry_run"))
+    actions = payload.get("actions") if isinstance(payload.get("actions"), dict) else {}
+    print("Spark security revoke-all")
+    print("")
+    if dry_run:
+        print("Dry run: no local state was changed.")
+        print("")
+    for key, label in [
+        ("autostart", "login autostart"),
+        ("processes", "tracked processes"),
+        ("telegram", "Telegram webhook/session state"),
+        ("secrets", "local Spark secrets"),
+        ("local_keys", "local bridge/API keys"),
+        ("custom_mcp", "custom MCP config"),
+        ("missions", "active missions"),
+        ("support_bundle", "support bundle"),
+    ]:
+        action = actions.get(key) if isinstance(actions, dict) else None
+        if not isinstance(action, dict):
+            continue
+        marker = "[OK]" if action.get("ok") else "[CHECK]"
+        if key == "secrets":
+            detail = f"{action.get('deleted_count', 0)} secret id(s) {'would be removed' if dry_run else 'removed'}"
+        elif key == "local_keys":
+            detail = f"{len(action.get('rotated_files') or [])} generated env file(s) {'would be rotated' if dry_run else 'rotated'}"
+        elif key == "missions":
+            detail = f"{len(action.get('paused_mission_ids') or [])} mission(s) {'would be paused' if dry_run else 'paused'}"
+        elif key == "support_bundle":
+            detail = str(action.get("path") or ("planned" if dry_run else action.get("error") or "not written"))
+        else:
+            detail = "planned" if action.get("planned") else str(action.get("error") or "done")
+        print(f"{marker} {label}: {detail}")
+    if payload.get("support_bundle_path"):
+        print("")
+        print(f"Redacted support bundle: {payload['support_bundle_path']}")
+    print("")
+    print("Remote cleanup still to do where applicable:")
+    for item in payload.get("manual_remote_revocations") or []:
+        print(f"  - {item}")
 
 
 SENSITIVE_VALUE_PATTERNS = [
@@ -6558,6 +7149,16 @@ def collect_security_audit_payload(*, deep: bool = False, hosted: bool = False) 
 
 
 def cmd_security(args: argparse.Namespace) -> int:
+    if args.security_command == "revoke-all":
+        payload = execute_security_revoke_all(
+            dry_run=bool(getattr(args, "dry_run", False)),
+            include_logs=bool(getattr(args, "include_logs", False)),
+        )
+        if args.json:
+            print(json.dumps(payload, indent=2))
+            return 0 if payload.get("ok") else 1
+        print_security_revoke_all_payload(payload)
+        return 0 if payload.get("ok") else 1
     if args.security_command != "audit":
         raise SystemExit(f"Unknown security command: {args.security_command}")
     payload = collect_security_audit_payload(deep=args.deep, hosted=getattr(args, "hosted", False))
@@ -9580,11 +10181,38 @@ def module_runtime_command_argv(module: Module, command: str, cwd: Path, env: di
     return argv
 
 
+def spawner_should_use_liveness_endpoint(env: dict[str, str]) -> bool:
+    return bool(
+        running_as_hosted_context()
+        or env.get("SPARK_LIVE_CONTAINER")
+        or env.get("RAILWAY_ENVIRONMENT")
+        or env.get("SPARK_ALLOWED_HOSTS")
+        or str(env.get("SPARK_HOSTED_PRIVATE_PREVIEW") or "").strip().lower() in {"1", "true", "yes", "on"}
+    )
+
+
+def spawner_runtime_port(module: Module, env: dict[str, str]) -> str:
+    bind_port = (env.get("SPARK_SPAWNER_PORT") or os.environ.get("SPARK_SPAWNER_PORT") or "").strip()
+    if bind_port:
+        return bind_port
+    ready_check = module.ready_check or ""
+    if ready_check.startswith(("http://", "https://")):
+        parsed = urllib.parse.urlparse(ready_check)
+        if parsed.port:
+            return str(parsed.port)
+    return "5173"
+
+
+def spawner_runtime_health_url(module: Module, env: dict[str, str]) -> str:
+    path = "/api/health/live" if spawner_should_use_liveness_endpoint(env) else "/api/providers"
+    return f"http://127.0.0.1:{spawner_runtime_port(module, env)}{path}"
+
+
 def module_runtime_ready_check(module: Module, env: dict[str, str]) -> str:
     if module.name == "spawner-ui":
         bind_port = (env.get("SPARK_SPAWNER_PORT") or "").strip()
         if bind_port:
-            return f"http://127.0.0.1:{bind_port}/api/providers"
+            return spawner_runtime_health_url(module, env)
     return module.ready_check
 
 
@@ -9592,11 +10220,12 @@ def expected_runtime_process_names(installed_names: set[str], setup_state: dict[
     names: list[str] = []
     profiles = setup_state.get("telegram_profiles") if isinstance(setup_state, dict) else None
     has_profiles = isinstance(profiles, dict) and bool(profiles)
-    if "spark-telegram-bot" in installed_names and not has_profiles:
+    external_telegram = telegram_ingress_is_external(setup_state if isinstance(setup_state, dict) else {})
+    if "spark-telegram-bot" in installed_names and not has_profiles and not external_telegram:
         names.append("spark-telegram-bot")
     if "spawner-ui" in installed_names:
         names.append("spawner-ui")
-    if isinstance(profiles, dict) and "spark-telegram-bot" in installed_names:
+    if isinstance(profiles, dict) and "spark-telegram-bot" in installed_names and not external_telegram:
         for profile, profile_state in sorted(profiles.items()):
             if isinstance(profile_state, dict) and telegram_profile_should_autostart(profile_state):
                 process_key = module_process_key("spark-telegram-bot", str(profile))
@@ -11447,6 +12076,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     setup_parser.add_argument("--secret", action="append", help="Provide manifest secret values as key=value; use @clipboard, @env:NAME, or @file:path for secret input")
     setup_parser.add_argument("--bot-token", help="Telegram BotFather token, @clipboard, @env:NAME, or @file:path")
+    setup_parser.add_argument("--external-telegram-ingress", action="store_true", help=argparse.SUPPRESS)
     setup_parser.add_argument(
         "--skip-telegram-token-check",
         action="store_true",
@@ -11628,6 +12258,14 @@ def build_parser() -> argparse.ArgumentParser:
     security_audit_parser.add_argument("--hosted", action="store_true", help="Include Docker/Railway hosted security checks")
     security_audit_parser.add_argument("--json", action="store_true")
     security_audit_parser.set_defaults(func=cmd_security)
+    security_revoke_parser = security_subparsers.add_parser(
+        "revoke-all",
+        help="Panic button: stop Spark, rotate local control keys, remove local secrets, and write a support bundle",
+    )
+    security_revoke_parser.add_argument("--dry-run", action="store_true", help="Report what would change without mutating local state")
+    security_revoke_parser.add_argument("--include-logs", action="store_true", help="Include redacted logs in the support bundle")
+    security_revoke_parser.add_argument("--json", action="store_true")
+    security_revoke_parser.set_defaults(func=cmd_security)
 
     approval_parser = subparsers.add_parser("approval", help="Classify sensitive Spark actions before enforcement")
     approval_subparsers = approval_parser.add_subparsers(dest="approval_command", required=True)

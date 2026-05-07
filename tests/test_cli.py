@@ -56,6 +56,7 @@ from spark_cli.cli import (
     ensure_generated_setup_secrets,
     ensure_bundle_modules_available,
     delete_secret,
+    execute_security_revoke_all,
     fetch_secret,
     infer_module_name_from_url,
     initial_follow_log_lines,
@@ -335,6 +336,15 @@ class SparkCliTests(unittest.TestCase):
         self.assertTrue(decision.requires_approval)
         self.assertEqual(decision.action_class, "credential_mutation")
         self.assertEqual(decision.confirmation_phrase, "approve secret change")
+
+    def test_approval_classifier_flags_security_revoke_all(self) -> None:
+        decision = approval_required_for_command(["spark", "security", "revoke-all"], CommandContext())
+        self.assertTrue(decision.requires_approval)
+        self.assertEqual(decision.action_class, "credential_mutation")
+        self.assertEqual(decision.risk, "critical")
+        self.assertEqual(decision.confirmation_phrase, "revoke spark access")
+        dry_run = approval_required_for_command(["spark", "security", "revoke-all", "--dry-run"], CommandContext())
+        self.assertFalse(dry_run.requires_approval)
 
     def test_approval_classifier_flags_purge_home_uninstall(self) -> None:
         decision = approval_required_for_command(["spark", "uninstall", "--all", "--purge-home"], CommandContext())
@@ -739,6 +749,106 @@ class SparkCliTests(unittest.TestCase):
         self.assertFalse(payload["sharing_manifest"]["uploaded"])
         self.assertNotIn("1234567890:AA", encoded)
         self.assertNotIn("Alice", encoded)
+
+    def test_security_revoke_all_rotates_keys_deletes_secrets_and_pauses_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            spark_home = root / ".spark"
+            state_dir = spark_home / "state"
+            config_dir = spark_home / "config"
+            module_config_dir = config_dir / "modules"
+            log_dir = spark_home / "logs"
+            spawner_state_dir = state_dir / "spawner-ui"
+            module_config_dir.mkdir(parents=True)
+            spawner_state_dir.mkdir(parents=True)
+            spawner_env_path = module_config_dir / "spawner-ui.env"
+            spawner_env_path.write_text(
+                "\n".join(
+                    [
+                        f"SPAWNER_STATE_DIR={spawner_state_dir}",
+                        "SPARK_BRIDGE_API_KEY=old-bridge",
+                        "SPARK_UI_API_KEY=old-ui",
+                        "MCP_API_KEY=old-mcp",
+                        "EVENTS_API_KEY=old-events",
+                        "MCP_ALLOW_CUSTOM_CONFIG=1",
+                        "TELEGRAM_RELAY_SECRET=old-relay",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            gateway_env_path = module_config_dir / "spark-telegram-bot.env"
+            gateway_env_path.write_text("TELEGRAM_RELAY_SECRET=old-relay\n", encoding="utf-8")
+            save_json(
+                spawner_state_dir / "active-mission.json",
+                {"missionId": "mission-revoke-test", "status": "running"},
+            )
+            save_json(
+                spawner_state_dir / "mission-control.json",
+                {
+                    "totalRelayed": 1,
+                    "perMission": {"mission-revoke-test": 1},
+                    "recent": [
+                        {
+                            "eventType": "mission_started",
+                            "missionId": "mission-revoke-test",
+                            "missionName": "Revoke Test",
+                            "summary": "Mission started.",
+                            "timestamp": "2026-05-05T00:00:00Z",
+                            "source": "test",
+                        }
+                    ],
+                },
+            )
+            save_json(
+                spawner_state_dir / "mission-provider-results.json",
+                {"missions": {"mission-revoke-test": [{"providerId": "codex", "status": "running"}]}},
+            )
+
+            with patch.multiple(
+                "spark_cli.cli",
+                SPARK_HOME=spark_home,
+                STATE_DIR=state_dir,
+                CONFIG_DIR=config_dir,
+                MODULE_CONFIG_DIR=module_config_dir,
+                LOG_DIR=log_dir,
+                REGISTRY_PATH=state_dir / "installed.json",
+                CONFIG_PATH=state_dir / "setup.json",
+                PID_PATH=state_dir / "pids.json",
+                PID_LOCK_PATH=state_dir / "pids.json.lock",
+                SECRETS_INDEX_PATH=config_dir / "secrets_index.json",
+                SECRETS_FILE_PATH=config_dir / "secrets.local.json",
+            ), \
+                 patch("spark_cli.cli.cmd_autostart_uninstall", return_value=0), \
+                 patch("spark_cli.cli.cmd_stop", return_value=0), \
+                 patch("spark_cli.cli.clear_telegram_webhook_state", return_value={"ok": True, "requested": 1, "results": []}), \
+                 patch("spark_cli.cli.collect_support_bundle_payload", return_value={"ok": True}):
+                store_secret(
+                    "telegram.profiles.primary.bot_token",
+                    "1234567890:ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghi1234567890",
+                    preferred="file",
+                )
+                store_secret("llm.zai.api_key", "zai-key", preferred="file")
+
+                payload = execute_security_revoke_all()
+
+            self.assertTrue(payload["ok"])
+            self.assertEqual(load_json(config_dir / "secrets_index.json", {}), {})
+            spawner_env = read_generated_env(spawner_env_path)
+            gateway_env = read_generated_env(gateway_env_path)
+            self.assertEqual(spawner_env["MCP_ALLOW_CUSTOM_CONFIG"], "0")
+            self.assertNotEqual(spawner_env["SPARK_BRIDGE_API_KEY"], "old-bridge")
+            self.assertNotEqual(spawner_env["SPARK_UI_API_KEY"], "old-ui")
+            self.assertEqual(spawner_env["TELEGRAM_RELAY_SECRET"], gateway_env["TELEGRAM_RELAY_SECRET"])
+            self.assertNotEqual(spawner_env["TELEGRAM_RELAY_SECRET"], "old-relay")
+            active = load_json(spawner_state_dir / "active-mission.json", {})
+            self.assertEqual(active["status"], "paused")
+            mission_control = load_json(spawner_state_dir / "mission-control.json", {})
+            self.assertEqual(mission_control["recent"][0]["eventType"], "mission_paused")
+            provider_results = load_json(spawner_state_dir / "mission-provider-results.json", {})
+            self.assertEqual(provider_results["missions"]["mission-revoke-test"][0]["status"], "cancelled")
+            self.assertTrue((spawner_state_dir / "security-revoke-all.json").exists())
+            self.assertTrue(Path(payload["support_bundle_path"]).exists())
 
     def test_security_audit_includes_secret_surface_and_provider_checks(self) -> None:
         with patch("spark_cli.cli.collect_secret_surface_payload", return_value={"ok": False, "detail": "secret found"}), \
@@ -1219,6 +1329,7 @@ class SparkCliTests(unittest.TestCase):
         parser = build_parser()
         self.assertEqual(parser.parse_args(["support", "bundle"]).support_command, "bundle")
         self.assertEqual(parser.parse_args(["security", "audit"]).security_command, "audit")
+        self.assertEqual(parser.parse_args(["security", "revoke-all", "--dry-run"]).security_command, "revoke-all")
         self.assertEqual(parser.parse_args(["providers", "test", "--role", "memory"]).providers_command, "test")
         self.assertEqual(parser.parse_args(["fix", "spawner"]).target, "spawner")
 
@@ -5181,6 +5292,57 @@ class SparkCliTests(unittest.TestCase):
                 module_runtime_ready_check(module, {"SPARK_SPAWNER_PORT": "8080"}),
                 "http://127.0.0.1:8080/api/providers",
             )
+            self.assertEqual(
+                module_runtime_ready_check(module, {"SPARK_SPAWNER_PORT": "8080", "SPARK_LIVE_CONTAINER": "1"}),
+                "http://127.0.0.1:8080/api/health/live",
+            )
+
+    def test_spawner_health_uses_liveness_endpoint_in_hosted_mode(self) -> None:
+        class Response:
+            status = 200
+
+            def __enter__(self) -> "Response":
+                return self
+
+            def __exit__(self, *_: object) -> None:
+                return None
+
+        module = Module(
+            name="spawner-ui",
+            path=Path("C:/tmp/spawner-ui"),
+            manifest={
+                "module": {"name": "spawner-ui", "version": "0.0.1", "kind": "app", "plane": "execution"},
+                "healthcheck": {"command": "npm run health:spark"},
+                "run": {"default": {"ready_check": "http://127.0.0.1:5173/api/providers"}},
+            },
+        )
+
+        with patch("spark_cli.cli.module_runtime_env", return_value={"SPARK_LIVE_CONTAINER": "1", "SPARK_SPAWNER_PORT": "8080"}), \
+             patch("spark_cli.cli.urllib.request.urlopen", return_value=Response()), \
+             patch("spark_cli.cli.run_runtime_command") as run_runtime:
+            result = evaluate_module_health(module)
+
+        self.assertTrue(result["healthy"])
+        self.assertEqual(result["healthcheck_command"], "GET http://127.0.0.1:8080/api/health/live")
+        run_runtime.assert_not_called()
+
+    def test_external_telegram_health_skips_local_bot_token_check(self) -> None:
+        module = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "1.0.0", "kind": "service", "plane": "ingress"},
+                "healthcheck": {"command": "npm run health:polling"},
+            },
+        )
+
+        with patch("spark_cli.cli.telegram_ingress_is_external", return_value=True), \
+             patch("spark_cli.cli.run_runtime_command") as run_runtime:
+            result = evaluate_module_health(module)
+
+        self.assertTrue(result["healthy"])
+        self.assertIn("Telegram ingress is external", result["detail"])
+        run_runtime.assert_not_called()
 
     def test_direct_node_package_script_argv_resolves_ts_node_without_cmd_wrapper(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

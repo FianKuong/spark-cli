@@ -351,6 +351,7 @@ Use `spark <cmd> --help` for full flags.
 | `spark providers list\|status\|test\|recommend` | Inspect, test, and choose LLM provider wiring |
 | `spark recommend llms\|providers` | Recommend setup choices |
 | `spark security audit` | Audit local security posture |
+| `spark security revoke-all` | Stop Spark, rotate local control keys, remove local secrets, pause missions, and write a redacted support bundle |
 | `spark approval classify -- <command>` | Classify whether a command requires approval |
 | `spark telegram connect [profile]` | Connect or rotate a Telegram bot profile token |
 | `spark update [target]` | Re-run install commands and pull managed git clones |

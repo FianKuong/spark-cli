@@ -18,6 +18,14 @@ require_env() {
   fi
 }
 
+looks_like_telegram_bot_token() {
+  printf '%s' "$1" | grep -Eq '^[0-9]{6,}:'
+}
+
+looks_like_telegram_admin_ids() {
+  printf '%s' "$1" | grep -Eq '[0-9]{5,}'
+}
+
 is_public_spawner_bind() {
   local host="${SPARK_SPAWNER_HOST:-0.0.0.0}"
   [ "$host" = "0.0.0.0" ] || [ "$host" = "::" ] || [ -n "${SPARK_ALLOWED_HOSTS:-}" ]
@@ -73,8 +81,25 @@ if [ -z "$provider" ]; then
   die "SPARK_LLM_PROVIDER is required. Good VPS/Railway choices: zai, codex with OPENAI_API_KEY, openai, openrouter, kimi, huggingface, minimax, anthropic with API key."
 fi
 
-require_env TELEGRAM_BOT_TOKEN
-require_env TELEGRAM_ADMIN_IDS
+telegram_mode="${SPARK_LIVE_TELEGRAM_MODE:-monolith}"
+case "$telegram_mode" in
+  monolith)
+    require_env TELEGRAM_BOT_TOKEN
+    require_env TELEGRAM_ADMIN_IDS
+    ;;
+  external)
+    if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && looks_like_telegram_bot_token "$TELEGRAM_BOT_TOKEN"; then
+      die "SPARK_LIVE_TELEGRAM_MODE=external but TELEGRAM_BOT_TOKEN looks like a real bot token. Put the token only on spark-telegram-bot."
+    fi
+    if [ -n "${TELEGRAM_ADMIN_IDS:-}" ] && looks_like_telegram_admin_ids "$TELEGRAM_ADMIN_IDS"; then
+      die "SPARK_LIVE_TELEGRAM_MODE=external but TELEGRAM_ADMIN_IDS looks like real admin IDs. Put admin IDs only on spark-telegram-bot."
+    fi
+    log "Using external Telegram ingress owner; Spark Live will not require or start a local bot poller."
+    ;;
+  *)
+    die "SPARK_LIVE_TELEGRAM_MODE must be 'monolith' or 'external'."
+    ;;
+esac
 
 export SPARK_SPAWNER_PORT="${SPARK_SPAWNER_PORT:-${PORT:-5173}}"
 export SPARK_SPAWNER_HOST="${SPARK_SPAWNER_HOST:-0.0.0.0}"
@@ -97,16 +122,25 @@ setup_args=(
   setup
   telegram-starter
   --non-interactive
+  --no-autostart
+  --no-start-now
   --run-install-commands
-  --bot-token
-  "@env:TELEGRAM_BOT_TOKEN"
-  --admin-telegram-ids
-  "$TELEGRAM_ADMIN_IDS"
   --llm-provider
   "$provider"
   --spawner-ui-url
   "http://127.0.0.1:${SPARK_SPAWNER_PORT}"
 )
+
+if [ "$telegram_mode" = "external" ]; then
+  setup_args+=(--external-telegram-ingress)
+else
+  setup_args+=(
+    --bot-token
+    "@env:TELEGRAM_BOT_TOKEN"
+    --admin-telegram-ids
+    "$TELEGRAM_ADMIN_IDS"
+  )
+fi
 
 case "$provider" in
   zai)

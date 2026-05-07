@@ -210,6 +210,18 @@ def approval_required_for_command(argv: list[str], context: CommandContext | Non
             target_display=" ".join(parts[:4]),
             confirmation_phrase="approve secret change",
         )
+    if first == "spark" and lowered[1:3] == ["security", "revoke-all"]:
+        if "--dry-run" in lowered:
+            return _decision(parts, ctx, "none", "none", "`spark security revoke-all --dry-run` is report-only.")
+        return _decision(
+            parts,
+            ctx,
+            "credential_mutation",
+            "critical",
+            "Command stops Spark, rotates local control keys, removes local secrets, and writes incident state.",
+            target_display="spark security revoke-all",
+            confirmation_phrase="revoke spark access",
+        )
 
     if first in {"curl", "wget", "iwr", "invoke-webrequest"} and re.search(
         r"\b(?:bash|sh|powershell|pwsh|iex|invoke-expression|python|node)\b",
