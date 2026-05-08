@@ -26,11 +26,16 @@ def test_live_docker_entrypoint_rejects_local_telegram_secrets_in_external_mode(
     script = (Path(__file__).resolve().parents[1] / "docker" / "live" / "entrypoint.sh").read_text(encoding="utf-8")
     assert "looks_like_telegram_bot_token" in script
     assert "looks_like_telegram_admin_ids" in script
+    assert "has_telegram_bot_token_env" in script
+    assert "has_telegram_admin_ids_env" in script
     assert "TELEGRAM_BOT_TOKEN looks like a real bot token" in script
+    assert "BOT_TOKEN looks like a real bot token" in script
     assert "TELEGRAM_ADMIN_IDS looks like real admin IDs" in script
+    assert "ADMIN_TELEGRAM_IDS looks like real admin IDs" in script
     assert "Put the token only on spark-telegram-bot" in script
     assert "Put admin IDs only on spark-telegram-bot" in script
-    assert "unset TELEGRAM_BOT_TOKEN TELEGRAM_ADMIN_IDS" in script
+    assert "Scrubbing Telegram ingress env vars from Spark Live external mode." in script
+    assert "unset TELEGRAM_BOT_TOKEN TELEGRAM_ADMIN_IDS BOT_TOKEN ADMIN_TELEGRAM_IDS" in script
 
 
 def test_live_docker_entrypoint_disables_os_autostart() -> None:

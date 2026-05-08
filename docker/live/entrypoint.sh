@@ -22,6 +22,14 @@ looks_like_telegram_bot_token() {
   printf '%s' "$1" | grep -Eq '^[0-9]{6,}:'
 }
 
+has_telegram_bot_token_env() {
+  [ -n "${TELEGRAM_BOT_TOKEN:-}" ] || [ -n "${BOT_TOKEN:-}" ]
+}
+
+has_telegram_admin_ids_env() {
+  [ -n "${TELEGRAM_ADMIN_IDS:-}" ] || [ -n "${ADMIN_TELEGRAM_IDS:-}" ]
+}
+
 looks_like_telegram_admin_ids() {
   printf '%s' "$1" | grep -Eq '[0-9]{5,}'
 }
@@ -91,10 +99,19 @@ case "$telegram_mode" in
     if [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && looks_like_telegram_bot_token "$TELEGRAM_BOT_TOKEN"; then
       die "SPARK_LIVE_TELEGRAM_MODE=external but TELEGRAM_BOT_TOKEN looks like a real bot token. Put the token only on spark-telegram-bot."
     fi
+    if [ -n "${BOT_TOKEN:-}" ] && looks_like_telegram_bot_token "$BOT_TOKEN"; then
+      die "SPARK_LIVE_TELEGRAM_MODE=external but BOT_TOKEN looks like a real bot token. Put the token only on spark-telegram-bot."
+    fi
     if [ -n "${TELEGRAM_ADMIN_IDS:-}" ] && looks_like_telegram_admin_ids "$TELEGRAM_ADMIN_IDS"; then
       die "SPARK_LIVE_TELEGRAM_MODE=external but TELEGRAM_ADMIN_IDS looks like real admin IDs. Put admin IDs only on spark-telegram-bot."
     fi
-    unset TELEGRAM_BOT_TOKEN TELEGRAM_ADMIN_IDS
+    if [ -n "${ADMIN_TELEGRAM_IDS:-}" ] && looks_like_telegram_admin_ids "$ADMIN_TELEGRAM_IDS"; then
+      die "SPARK_LIVE_TELEGRAM_MODE=external but ADMIN_TELEGRAM_IDS looks like real admin IDs. Put admin IDs only on spark-telegram-bot."
+    fi
+    if has_telegram_bot_token_env || has_telegram_admin_ids_env; then
+      log "Scrubbing Telegram ingress env vars from Spark Live external mode."
+    fi
+    unset TELEGRAM_BOT_TOKEN TELEGRAM_ADMIN_IDS BOT_TOKEN ADMIN_TELEGRAM_IDS
     log "Using external Telegram ingress owner; Spark Live will not require or start a local bot poller."
     ;;
   *)
