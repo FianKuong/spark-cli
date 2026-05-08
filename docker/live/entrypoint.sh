@@ -94,6 +94,7 @@ case "$telegram_mode" in
     if [ -n "${TELEGRAM_ADMIN_IDS:-}" ] && looks_like_telegram_admin_ids "$TELEGRAM_ADMIN_IDS"; then
       die "SPARK_LIVE_TELEGRAM_MODE=external but TELEGRAM_ADMIN_IDS looks like real admin IDs. Put admin IDs only on spark-telegram-bot."
     fi
+    unset TELEGRAM_BOT_TOKEN TELEGRAM_ADMIN_IDS
     log "Using external Telegram ingress owner; Spark Live will not require or start a local bot poller."
     ;;
   *)
