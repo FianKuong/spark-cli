@@ -460,4 +460,4 @@ See [docs/SPARK_LIVE_DOCKER_RAILWAY.md](./docs/SPARK_LIVE_DOCKER_RAILWAY.md) for
 
 ## License
 
-MIT. See [LICENSE](./LICENSE).
+GNU Affero General Public License v3.0 only. See [LICENSE](./LICENSE).

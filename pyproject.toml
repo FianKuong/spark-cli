@@ -8,6 +8,7 @@ version = "0.1.0"
 description = "Local Spark installer and operator CLI spike"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "AGPL-3.0-only"
 dependencies = [
     "keyring>=24.0",
 ]

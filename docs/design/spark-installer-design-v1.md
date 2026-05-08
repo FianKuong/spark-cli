@@ -90,7 +90,7 @@ name = "memory"
 version = "0.3.0"
 description = "Persistent memory for Spark agents"
 homepage = "https://github.com/spark/spark-memory"
-license = "MIT"
+license = "AGPL-3.0-only"
 
 [runtime]
 kind = "python"           # python | node | go | rust | binary
@@ -390,7 +390,7 @@ Pro you want during trial, no payment until it ends.
 ### Open-format-paid-corpus principle (technical statement)
 
 - The `spark.toml` schema, the H70-C+ skill format spec, the registry
-  format, and the CLI itself: **MIT-licensed, open source.**
+  format, and the CLI itself: **AGPL-3.0-only, open source.**
 - The Spark-curated H70 skill corpus, the spark-blessed premium chips,
   the Spark Cloud / hosted dashboard infrastructure: **proprietary,
   Spark Pro.**
@@ -399,9 +399,9 @@ Pro you want during trial, no payment until it ends.
   (their own license server in `[license.provider]`) or give it away
   for free.
 
-This split is enforced by being clear about what files / repos are MIT
+This split is enforced by being clear about what files / repos are AGPL-3.0-only
 vs proprietary. Don't mix them in the same repo. The blessed registry
-manifest itself is MIT (`github.com/spark/registry`). The corpus
+manifest itself is AGPL-3.0-only (`github.com/spark/registry`). The corpus
 content is in a separate proprietary repo (`github.com/spark/corpus`)
 that the registry points at via signed URLs requiring license tokens.
 

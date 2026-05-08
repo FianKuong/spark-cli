@@ -54,7 +54,7 @@ Fresh-machine install path is verified end to end.
 
 | Check | Result |
 |---|---|
-| `spark-cli` repo public on GitHub | `vibeforge1111/spark-cli` (PRIVATE, MIT) |
+| `spark-cli` repo public on GitHub | `vibeforge1111/spark-cli` (PRIVATE, AGPL-3.0-only) |
 | `pip install -e .` works from clone | yes |
 | `python -m pytest tests/ -q` | 84 pass |
 | Three starter modules have `spark.toml` on `origin/main` | yes: `spark-telegram-bot`, `vibeship-spawner-ui`, `spark-intelligence-builder` |
