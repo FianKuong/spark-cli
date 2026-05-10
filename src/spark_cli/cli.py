@@ -13029,7 +13029,7 @@ def build_parser() -> argparse.ArgumentParser:
     access_setup_parser.add_argument(
         "--enable-high-agency",
         action="store_true",
-        help="For --level 5 only: write local guardrail env so Spark can use whole-computer operator mode after restart",
+        help="For --level 5 only: write local safety settings so Spark can use whole-computer operator mode after refresh",
     )
     access_setup_parser.add_argument("--json", action="store_true")
     access_setup_parser.set_defaults(func=cmd_access)
