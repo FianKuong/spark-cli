@@ -226,6 +226,11 @@ class AccessSetupTests(unittest.TestCase):
         self.assertIn("/sandbox:rw,nosuid,uid=1000,gid=1000,size=512m", ps1)
         self.assertIn("/sandbox:rw,nosuid,uid=1000,gid=1000,size=512m", sh)
         self.assertIn("--network \"${network}\"", sh)
+        for script in (ps1, sh):
+            self.assertNotIn("/var/run/docker.sock", script)
+            self.assertNotIn("--mount", script)
+            self.assertNotIn("--volume", script)
+            self.assertNotIn(" -v ", script)
 
 
 if __name__ == "__main__":

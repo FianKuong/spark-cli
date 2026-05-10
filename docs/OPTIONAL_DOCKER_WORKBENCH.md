@@ -102,6 +102,11 @@ The smoke command builds the sandbox image if needed, then runs `spark status
 --help` with network off, no real Spark secrets, a read-only root filesystem,
 all Linux capabilities dropped, and only tmpfs scratch space.
 
+By default the sandbox lane does not bind-mount the operator's home, current
+workspace, Spark home, or Docker socket. The Spark CLI checkout is copied into
+the image at build time, and writable state is limited to container tmpfs paths
+such as `/tmp`, `/sandbox/home`, and `/sandbox/spark-home`.
+
 ```powershell
 .\scripts\docker-sandbox-run.ps1 status --help
 ```
