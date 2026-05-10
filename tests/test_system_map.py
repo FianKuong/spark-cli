@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -8,7 +9,13 @@ from io import StringIO
 from pathlib import Path
 
 from spark_cli.cli import build_parser
-from spark_cli.system_map import build_memory_movement_index, count_safe_jsonl, summarize_pids, summarize_setup
+from spark_cli.system_map import (
+    build_memory_movement_index,
+    count_safe_jsonl,
+    inspect_builder_event_samples,
+    summarize_pids,
+    summarize_setup,
+)
 
 
 class SparkSystemMapTests(unittest.TestCase):
@@ -113,6 +120,76 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertNotIn("My private fact", encoded)
         self.assertNotIn("telegram-token-value", encoded)
         self.assertNotIn("human-telegram-123-profile-preferred-name", encoded)
+
+    def test_builder_event_samples_omit_event_bodies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            builder_home = Path(tmp) / "spark-intelligence"
+            builder_home.mkdir()
+            conn = sqlite3.connect(builder_home / "state.db")
+            try:
+                conn.execute(
+                    """
+                    create table builder_events(
+                        event_id text,
+                        created_at text,
+                        event_type text,
+                        status text,
+                        severity text,
+                        component text,
+                        request_id text,
+                        trace_ref text,
+                        correlation_id text,
+                        parent_event_id text,
+                        target_surface text,
+                        evidence_lane text,
+                        truth_kind text,
+                        summary text,
+                        facts_json text,
+                        provenance_json text
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    insert into builder_events(
+                        event_id, created_at, event_type, status, severity, component,
+                        request_id, trace_ref, correlation_id, parent_event_id,
+                        target_surface, evidence_lane, truth_kind, summary, facts_json, provenance_json
+                    ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "evt-1",
+                        "2026-05-10T13:00:00Z",
+                        "route_selected",
+                        "succeeded",
+                        "info",
+                        "router",
+                        "req-1",
+                        "trace-1",
+                        "corr-1",
+                        None,
+                        "telegram",
+                        "route",
+                        "observed",
+                        "private user message",
+                        json.dumps({"token": "secret", "message": "private"}),
+                        json.dumps({"source": "private"}),
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+
+            samples = inspect_builder_event_samples(builder_home)
+
+        encoded = json.dumps(samples)
+        self.assertEqual(samples["sample_count"], 1)
+        self.assertEqual(samples["events"][0]["event_id"], "evt-1")
+        self.assertEqual(samples["events"][0]["trace_ref"], "trace-1")
+        self.assertEqual(samples["top_trace_refs"][0]["trace_ref"], "trace-1")
+        self.assertNotIn("private user message", encoded)
+        self.assertNotIn("secret", encoded)
+        self.assertNotIn("facts_json", encoded)
 
     def test_os_compile_command_writes_redacted_outputs(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

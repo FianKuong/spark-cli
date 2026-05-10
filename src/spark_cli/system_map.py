@@ -78,6 +78,22 @@ SAFE_MEMORY_STATUS_KEYS = {
     "non_override_rules",
 }
 
+SAFE_BUILDER_EVENT_SAMPLE_COLUMNS = (
+    "event_id",
+    "created_at",
+    "event_type",
+    "status",
+    "severity",
+    "component",
+    "request_id",
+    "trace_ref",
+    "correlation_id",
+    "parent_event_id",
+    "target_surface",
+    "evidence_lane",
+    "truth_kind",
+)
+
 RAW_MEMORY_KEY_HINTS = (
     "content",
     "evidence",
@@ -706,6 +722,70 @@ def inspect_builder_event_trace(builder_home: Path) -> dict[str, Any]:
     return out
 
 
+def inspect_builder_event_samples(builder_home: Path, *, limit: int = 40) -> dict[str, Any]:
+    db_path = builder_home / "state.db"
+    out: dict[str, Any] = {
+        "source": "builder_events",
+        "path": str(db_path),
+        "exists": db_path.exists(),
+        "limit": limit,
+        "redaction": "allowlisted event metadata only; summaries, facts JSON, provenance JSON, and message text omitted",
+    }
+    if not db_path.exists():
+        return out
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            tables = [row[0] for row in conn.execute("select name from sqlite_master where type='table'")]
+            if "builder_events" not in tables:
+                out["table_exists"] = False
+                return out
+            out["table_exists"] = True
+            columns = [row[1] for row in conn.execute("pragma table_info(builder_events)")]
+            selected = [column for column in SAFE_BUILDER_EVENT_SAMPLE_COLUMNS if column in columns]
+            if not selected:
+                out["events"] = []
+                out["sample_count"] = 0
+                return out
+
+            quoted = ", ".join(f'"{column}"' for column in selected)
+            order_column = "created_at" if "created_at" in columns else "rowid"
+            rows = conn.execute(
+                f'select {quoted} from builder_events order by "{order_column}" desc limit ?',
+                (max(0, min(int(limit), 100)),),
+            ).fetchall()
+            events: list[dict[str, Any]] = []
+            trace_counts: Counter[str] = Counter()
+            for row in rows:
+                event: dict[str, Any] = {}
+                for column in selected:
+                    value = row[column]
+                    if value is None:
+                        event[column] = None
+                    elif isinstance(value, (int, float, bool)):
+                        event[column] = value
+                    else:
+                        event[column] = safe_short_string(str(value), limit=160)
+                trace_ref = str(event.get("trace_ref") or "").strip()
+                trace_counts[trace_ref or "[missing]"] += 1
+                events.append(event)
+            out["events"] = events
+            out["sample_count"] = len(events)
+            out["top_trace_refs"] = [
+                {"trace_ref": trace_ref, "event_count": count}
+                for trace_ref, count in trace_counts.most_common(20)
+                if trace_ref != "[missing]"
+            ]
+            out["missing_trace_ref_count"] = int(trace_counts.get("[missing]", 0))
+        finally:
+            conn.close()
+    except Exception as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+    return out
+
+
 def build_modules(
     registry: dict[str, Any],
     installed: dict[str, Any],
@@ -862,6 +942,7 @@ def build_trace_index(spark_home: Path, builder_home: Path) -> dict[str, Any]:
         "generated_at": utc_now(),
         "redaction": "aggregate metadata only; no raw event summaries, mission responses, logs, or message text",
         "builder_events": inspect_builder_event_trace(builder_home),
+        "builder_event_samples": inspect_builder_event_samples(builder_home),
         "telegram_final_answer_gate": count_safe_jsonl(telegram_state / "final-answer-gate-audit.jsonl"),
         "telegram_outbound_audit": count_safe_jsonl(telegram_state / "node-outbound-audit.jsonl"),
         "spawner_mission_control_shape": inspect_json_shape(spawner_state / "mission-control.json"),
@@ -1074,6 +1155,7 @@ def compile_summary(compiled: dict[str, Any], written: dict[str, str] | None = N
     trace_index = as_dict(compiled["trace_index"])
     memory_index = as_dict(compiled["memory_movement_index"])
     builder_events = as_dict(trace_index.get("builder_events"))
+    builder_event_samples = as_dict(trace_index.get("builder_event_samples"))
     memory_status = as_dict(as_dict(memory_index.get("safe_status_export")).get("status"))
     builder_memory_tables = as_dict(memory_index.get("builder_memory_tables"))
     return {
@@ -1089,6 +1171,7 @@ def compile_summary(compiled: dict[str, Any], written: dict[str, str] | None = N
             for key, value in as_dict(as_dict(compiled["authority_view"]).get("observed_sources")).items()
         },
         "builder_event_rows": builder_events.get("row_count"),
+        "builder_event_samples": builder_event_samples.get("sample_count"),
         "memory_movement_status": memory_status.get("status"),
         "memory_movement_rows": memory_status.get("row_count"),
         "builder_memory_table_count": builder_memory_tables.get("table_count"),
