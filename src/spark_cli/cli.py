@@ -1458,9 +1458,10 @@ def collect_module_provenance_payload(
     }
 
 
-def resolve_remote_git_head(source: str) -> str:
+def resolve_remote_git_ref(source: str, ref: str = "HEAD") -> str:
+    remote_ref = (ref or "HEAD").strip() or "HEAD"
     result = subprocess.run(
-        git_command("ls-remote", normalize_git_url(source), "HEAD"),
+        git_command("ls-remote", normalize_git_url(source), remote_ref),
         capture_output=True,
         text=True,
         timeout=30,
@@ -1471,18 +1472,22 @@ def resolve_remote_git_head(source: str) -> str:
     first_line = result.stdout.splitlines()[0] if result.stdout.splitlines() else ""
     commit = first_line.split()[0].strip().lower() if first_line else ""
     if not validate_commit_pin(commit):
-        raise RuntimeError("remote HEAD did not resolve to a full commit SHA")
+        raise RuntimeError(f"remote {remote_ref} did not resolve to a full commit SHA")
     return commit
+
+
+def resolve_remote_git_head(source: str) -> str:
+    return resolve_remote_git_ref(source, "HEAD")
 
 
 def collect_registry_pin_drift_payload(
     *,
     registry: dict[str, Any] | None = None,
-    resolver: Callable[[str], str] | None = None,
+    resolver: Callable[..., str] | None = None,
 ) -> dict[str, Any]:
     registry_payload = registry if registry is not None else load_registry_definition()
     modules = registry_payload.get("modules", {}) if isinstance(registry_payload, dict) else {}
-    resolver = resolver or resolve_remote_git_head
+    resolver = resolver or resolve_remote_git_ref
     checks: list[dict[str, Any]] = []
     for name, metadata in sorted(modules.items()):
         if not isinstance(metadata, dict) or not bool(metadata.get("blessed", False)):
@@ -1491,9 +1496,15 @@ def collect_registry_pin_drift_payload(
         if not is_git_source(source):
             continue
         pinned = str(metadata.get("commit", "")).strip().lower()
+        remote_ref = str(metadata.get("verify_ref") or metadata.get("release_ref") or "HEAD").strip() or "HEAD"
         try:
             validate_commit_pin(pinned)
-            remote = resolver(source).strip().lower()
+            try:
+                remote = resolver(source, remote_ref).strip().lower()
+            except TypeError:
+                if remote_ref != "HEAD":
+                    raise
+                remote = resolver(source).strip().lower()
             validate_commit_pin(remote)
         except (RuntimeError, SystemExit) as error:
             checks.append(
@@ -1501,21 +1512,24 @@ def collect_registry_pin_drift_payload(
                     "name": str(name),
                     "source": source,
                     "pinned_commit": pinned,
+                    "remote_ref": remote_ref,
                     "remote_head": "",
                     "ok": False,
-                    "detail": f"Could not verify remote HEAD: {error}",
+                    "detail": f"Could not verify remote {remote_ref}: {error}",
                 }
             )
             continue
         ok = pinned == remote
+        remote_label = "remote HEAD" if remote_ref == "HEAD" else f"remote {remote_ref}"
         checks.append(
             {
                 "name": str(name),
                 "source": source,
                 "pinned_commit": pinned,
+                "remote_ref": remote_ref,
                 "remote_head": remote,
                 "ok": ok,
-                "detail": "registry pin matches remote HEAD" if ok else "registry pin lags or diverges from remote HEAD",
+                "detail": f"registry pin matches {remote_label}" if ok else f"registry pin lags or diverges from {remote_label}",
             }
         )
     return {

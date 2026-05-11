@@ -3921,6 +3921,31 @@ class SparkCliTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertIn("matches remote HEAD", payload["checks"][0]["detail"])
 
+    def test_registry_pin_drift_payload_accepts_explicit_release_ref(self) -> None:
+        calls: list[tuple[str, str]] = []
+        registry = {
+            "modules": {
+                "spark-telegram-bot": {
+                    "source": "https://github.com/vibeforge1111/spark-telegram-bot",
+                    "commit": "d" * 40,
+                    "verify_ref": "refs/heads/release/stability-2026-05-09",
+                    "blessed": True,
+                }
+            },
+            "bundles": {},
+        }
+
+        def resolver(source: str, ref: str) -> str:
+            calls.append((source, ref))
+            return "d" * 40
+
+        payload = collect_registry_pin_drift_payload(registry=registry, resolver=resolver)
+
+        self.assertTrue(payload["ok"])
+        self.assertEqual(calls, [("https://github.com/vibeforge1111/spark-telegram-bot", "refs/heads/release/stability-2026-05-09")])
+        self.assertEqual(payload["checks"][0]["remote_ref"], "refs/heads/release/stability-2026-05-09")
+        self.assertIn("matches remote refs/heads/release/stability-2026-05-09", payload["checks"][0]["detail"])
+
     def test_autostart_install_defaults_to_telegram_starter_and_now_is_optional(self) -> None:
         args = build_parser().parse_args(["autostart", "install", "--now"])
         self.assertEqual(args.target, "telegram-starter")
