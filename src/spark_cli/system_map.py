@@ -3373,6 +3373,30 @@ def build_voice_surface_view(system_map: dict[str, Any]) -> dict[str, Any]:
     installed_modules = set(as_dict(system_map.get("installed_modules")).keys())
     available = "spark-voice-comms" in repo_names
     installed = "spark-voice-comms" in installed_modules
+    source_roots = as_dict(system_map.get("source_roots"))
+
+    runtime_state_error = "spark_home_missing"
+    runtime_state: dict[str, Any] = {}
+    spark_home_raw = source_roots.get("spark_home")
+    if isinstance(spark_home_raw, str) and spark_home_raw.strip():
+        runtime_state_path = Path(spark_home_raw).expanduser() / "state" / "spark-voice-comms" / "voice-runtime-state.json"
+        runtime_state_raw, runtime_state_error = read_json(runtime_state_path)
+        if isinstance(runtime_state_raw, dict):
+            runtime_state = runtime_state_raw
+
+    runtime_state_export_present = runtime_state.get("schema_version") == "spark.voice_runtime_state.v1"
+    if runtime_state and not runtime_state_export_present:
+        runtime_state_error = "invalid_schema"
+
+    runtime_stt = as_dict(runtime_state.get("stt")) if runtime_state_export_present else {}
+    runtime_tts = as_dict(runtime_state.get("tts")) if runtime_state_export_present else {}
+    runtime_delivery = as_dict(runtime_state.get("telegram_delivery")) if runtime_state_export_present else {}
+    runtime_claims = as_dict(runtime_state.get("claim_levels")) if runtime_state_export_present else {}
+    runtime_sources = [str(item) for item in as_list(runtime_state.get("source_ledger"))] if runtime_state_export_present else []
+    stt_ready = runtime_stt.get("ready") is True
+    tts_ready = runtime_tts.get("ready") is True
+    delivery_ready = runtime_delivery.get("ready") is True
+    configured = runtime_claims.get("configured") is True or stt_ready or tts_ready
 
     def source_file_contains(repo_name: str, relative: str, *needles: str) -> bool:
         root = repo_paths.get(repo_name)
@@ -3443,6 +3467,19 @@ def build_voice_surface_view(system_map: dict[str, Any]) -> dict[str, Any]:
     else:
         source_mode = "disabled"
 
+    runtime_egress_ready = tts_ready and delivery_ready
+    if stt_ready and runtime_egress_ready:
+        runtime_mode = "duplex"
+    elif stt_ready:
+        runtime_mode = "ingress"
+    elif runtime_egress_ready:
+        runtime_mode = "egress"
+    else:
+        runtime_mode = source_mode
+
+    hard_blocked = not available or not installed or source_mode == "disabled" or builder_has_transcript_preview
+    final_answer_supported = delivery_ready and telegram_has_voice_bridge
+
     blockers = []
     if not available:
         blockers.append("spark-voice-comms repo not discovered")
@@ -3450,16 +3487,42 @@ def build_voice_surface_view(system_map: dict[str, Any]) -> dict[str, Any]:
         blockers.append("spark-voice-comms is not installed in local Spark state")
     if available and source_mode == "disabled":
         blockers.append("voice ingress/egress source hooks are not detected")
-    blockers.append("voice provider/profile runtime status is not exported to Spark OS state")
-    blockers.append("voice final-answer join evidence is not compiled")
+    if available and installed and not runtime_state_export_present:
+        blockers.append("voice provider/profile runtime status is not exported to Spark OS state")
+    if runtime_state_export_present and runtime_claims.get("synthesis_ready") is not True:
+        blockers.append("voice synthesis is not ready")
+    if runtime_state_export_present and runtime_claims.get("delivery_ready") is not True:
+        blockers.append("voice Telegram delivery is not proven")
+    if not final_answer_supported:
+        blockers.append("voice final-answer join evidence is not compiled")
     if builder_has_transcript_preview:
         blockers.append("Builder retains raw voice transcript preview in private trace fields")
+
+    trace_evidence = "missing_source_hooks"
+    if source_mode != "disabled" and runtime_state_export_present:
+        trace_evidence = "runtime_state_export_present"
+        if not final_answer_supported:
+            trace_evidence = "runtime_state_export_present_delivery_unproven"
+    elif source_mode != "disabled":
+        trace_evidence = "source_present_not_proven"
+
+    provider_kind = first_string(
+        runtime_stt.get("provider_kind"),
+        runtime_stt.get("mode"),
+        runtime_tts.get("mode"),
+        "unknown",
+    )
+    voice_style_ref = first_string(
+        runtime_tts.get("voice_name"),
+        runtime_tts.get("voice_id_masked"),
+        runtime_tts.get("voice_id_fingerprint"),
+    )
 
     return {
         "schema_version": VOICE_SURFACE_SCHEMA,
         "generated_at": utc_now(),
         "owner_system": "spark-voice-comms",
-        "mode": "disabled" if blockers else source_mode,
+        "mode": "disabled" if hard_blocked else runtime_mode,
         "source_capability": {
             "repo_discovered": available,
             "installed_in_spark_state": installed,
@@ -3470,20 +3533,36 @@ def build_voice_surface_view(system_map: dict[str, Any]) -> dict[str, Any]:
             "status_hook_present": voice_hook_has_status and builder_has_status_bridge,
             "telegram_bridge_present": telegram_has_voice_bridge,
         },
-        "provider": {"configured": False, "kind": "unknown"},
-        "profile": {"configured": False, "voice_style_ref": None},
-        "authority": {"can_answer": not blockers, "can_trigger_actions": False, "requires_confirmation_for_actions": True},
+        "provider": {
+            "configured": configured,
+            "kind": provider_kind if configured else "unknown",
+            "stt_ready": stt_ready,
+            "tts_ready": tts_ready,
+            "runtime_state_export_present": runtime_state_export_present,
+        },
+        "profile": {"configured": bool(voice_style_ref), "voice_style_ref": voice_style_ref or None},
+        "authority": {
+            "can_answer": runtime_egress_ready and final_answer_supported and not hard_blocked,
+            "can_trigger_actions": False,
+            "requires_confirmation_for_actions": True,
+        },
         "memory_policy": {
             "transcripts_are_durable_by_default": False,
             "raw_audio_exported_to_os_artifacts": False,
             "transcript_bodies_exported_to_os_artifacts": False,
         },
         "trace": {
-            "voice_events_supported": False,
-            "final_answer_check_supported": False,
+            "voice_events_supported": bool(runtime_sources),
+            "final_answer_check_supported": final_answer_supported,
             "source_hooks_present": source_mode != "disabled",
             "telegram_delivery_bridge_present": telegram_has_voice_bridge,
-            "trace_evidence": "source_present_not_proven" if source_mode != "disabled" else "missing_source_hooks",
+            "runtime_state_export_present": runtime_state_export_present,
+            "runtime_state_error": None if runtime_state_export_present else runtime_state_error,
+            "stt_ready": stt_ready,
+            "tts_ready": tts_ready,
+            "delivery_ready": delivery_ready,
+            "conversation_ready": runtime_claims.get("conversation_ready") is True,
+            "trace_evidence": trace_evidence,
         },
         "privacy_findings": {"builder_transcript_preview_present": builder_has_transcript_preview},
         "blockers": blockers,
