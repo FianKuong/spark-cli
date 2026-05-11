@@ -15,6 +15,7 @@ from spark_cli.system_map import (
     build_authority_view,
     build_capability_catalog,
     build_memory_movement_index,
+    build_duplicate_truths,
     build_repo_board,
     build_trace_current_health,
     build_trace_repair_queue,
@@ -321,6 +322,38 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertIn("release metadata drift", telegram_pin_item["evidence"])
         self.assertEqual(repo_board["summary"]["duplicate_truth_count"], len(item_ids))
         self.assertFalse(compiled["operating_cockpit"]["action_boundary"].startswith("Write"))
+
+    def test_dirty_desktop_repo_is_backlog_when_installed_runtime_is_clean(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            desktop = root / "Desktop"
+            spark_home = root / ".spark"
+            desktop_builder = desktop / "spark-intelligence-builder"
+            installed_builder = spark_home / "modules" / "spark-intelligence-builder-release" / "source"
+            desktop_builder.mkdir(parents=True)
+            installed_builder.mkdir(parents=True)
+            init_git_repo(desktop_builder)
+            init_git_repo(installed_builder)
+            (desktop_builder / "README.md").write_text("dirty backlog\n", encoding="utf-8")
+
+            duplicate_truths = build_duplicate_truths(
+                {
+                    "source_roots": {"desktop": str(desktop), "spark_home": str(spark_home)},
+                    "installed_modules": {
+                        "spark-intelligence-builder": {
+                            "path": str(installed_builder),
+                            "source": str(installed_builder),
+                        }
+                    },
+                    "discovered_repos": [collect_repo_metadata(desktop_builder)],
+                }
+            )
+
+        item = next(item for item in duplicate_truths["items"] if item["id"] == "spark-intelligence-builder-dirty-owner-repo")
+        self.assertEqual(item["classification"], "read_only_backlog")
+        self.assertEqual(item["severity"], "warning")
+        self.assertIn("non-authoritative backlog", item["evidence"])
+        self.assertTrue(item["evidence_details"]["installed_runtime"]["clean"])
 
     def test_voice_surface_uses_sanitized_runtime_state_export(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

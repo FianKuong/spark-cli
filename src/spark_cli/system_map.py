@@ -3780,6 +3780,27 @@ def git_dirty_from_repo(repo: dict[str, Any]) -> tuple[int, int]:
     return 0, 0
 
 
+def installed_runtime_clean_summary(installed_modules: dict[str, Any], module_id: str) -> dict[str, Any]:
+    installed = as_dict(installed_modules.get(module_id))
+    installed_path_raw = first_string(installed.get("path"), installed.get("source"))
+    if not installed_path_raw:
+        return {"clean": False, "path": "", "head": "", "reason": "not installed"}
+    installed_path = Path(installed_path_raw)
+    installed_git = git_board_status(installed_path)
+    dirty = int(installed_git.get("dirty_tracked_count") or 0)
+    untracked = int(installed_git.get("untracked_count") or 0)
+    head = str(installed_git.get("head_commit") or "")[:12]
+    return {
+        "clean": dirty == 0 and untracked == 0,
+        "path": str(installed_path),
+        "head": head,
+        "branch": installed_git.get("branch"),
+        "dirty_tracked_count": dirty,
+        "untracked_count": untracked,
+        "reason": "" if dirty == 0 and untracked == 0 else "installed runtime dirty",
+    }
+
+
 def build_duplicate_truths(system_map: dict[str, Any]) -> dict[str, Any]:
     source_roots = as_dict(system_map.get("source_roots"))
     spark_home = Path(str(source_roots.get("spark_home") or "")).expanduser()
@@ -3903,20 +3924,49 @@ def build_duplicate_truths(system_map: dict[str, Any]) -> dict[str, Any]:
             continue
         dirty, untracked = git_dirty_from_repo(repo)
         if dirty or untracked:
+            runtime_module = {"spark-intelligence-builder": "spark-intelligence-builder", "spawner-ui": "spawner-ui"}.get(repo_name)
+            runtime_summary = installed_runtime_clean_summary(installed_modules, runtime_module) if runtime_module else {}
+            repo_path = str(repo.get("path") or "")
+            installed_path = str(runtime_summary.get("path") or "")
+            non_authoritative_backlog = bool(runtime_summary.get("clean")) and installed_path and repo_path and installed_path != repo_path
+            item_classification = "read_only_backlog" if non_authoritative_backlog else classification
+            severity = "warning" if owner not in {"spark-intelligence-builder", "spark-telegram-bot", "spawner-ui"} else "critical"
+            risk = "Dirty source can be mistaken for released or installed truth before curation."
+            next_safe_action = "Curate the worktree by feature family before merge, release, or cleanup."
+            rollback = "Do not revert unrelated work; leave the worktree intact until source-owner curation."
+            evidence = f"Repo board reports {dirty} tracked and {untracked} untracked local changes."
+            evidence_details: dict[str, Any] | None = None
+            if non_authoritative_backlog:
+                severity = "warning"
+                evidence += (
+                    " Installed runtime truth is clean and points at a different source path, so this checkout is "
+                    "classified as non-authoritative backlog."
+                )
+                risk = "Backlog source can confuse operators, but current installed runtime truth is clean and separate."
+                next_safe_action = (
+                    "Keep this checkout out of installer/release truth. Re-derive selected backlog slices onto the clean "
+                    "canonical runtime line with focused tests before promotion."
+                )
+                rollback = "Leave the backlog checkout intact; keep installed runtime metadata pointed at the clean canonical source."
+                evidence_details = {
+                    "installed_runtime": runtime_summary,
+                    "source_truth_policy": "Dirty Desktop checkout is backlog while clean installed runtime remains canonical.",
+                }
             items.append(
                 duplicate_truth_item(
                     item_id=f"{repo_name}-dirty-owner-repo",
                     fact=fact,
-                    classification=classification,
+                    classification=item_classification,
                     owner_repo=owner,
-                    canonical_path=str(repo.get("path") or ""),
+                    canonical_path=repo_path,
                     duplicate_path="",
-                    evidence=f"Repo board reports {dirty} tracked and {untracked} untracked local changes.",
-                    risk="Dirty source can be mistaken for released or installed truth before curation.",
-                    next_safe_action="Curate the worktree by feature family before merge, release, or cleanup.",
+                    evidence=evidence,
+                    risk=risk,
+                    next_safe_action=next_safe_action,
                     verification_command="git status --short --branch",
-                    rollback="Do not revert unrelated work; leave the worktree intact until source-owner curation.",
-                    severity="warning" if owner not in {"spark-intelligence-builder", "spark-telegram-bot", "spawner-ui"} else "critical",
+                    rollback=rollback,
+                    severity=severity,
+                    evidence_details=evidence_details,
                 )
             )
 
