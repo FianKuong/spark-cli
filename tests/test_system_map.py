@@ -655,12 +655,14 @@ class SparkSystemMapTests(unittest.TestCase):
             (labs / "docs" / "creator_system" / "schemas").mkdir(parents=True)
             (labs / "src" / "chip_labs").mkdir(parents=True)
             (labs / "runs" / "demo" / "benchmark").mkdir(parents=True)
+            (labs / "runs" / "demo" / "autoloop").mkdir(parents=True)
             (labs / "runs" / "demo" / "swarm").mkdir(parents=True)
             (swarm / "config").mkdir(parents=True)
             (swarm / "schemas").mkdir(parents=True)
             (swarm / "packages" / "contracts" / "src").mkdir(parents=True)
             (swarm / "apps" / "api" / "src" / "collective").mkdir(parents=True)
             (swarm / "collective" / "demo").mkdir(parents=True)
+            (swarm / "templates" / "creator-system-network-proposal").mkdir(parents=True)
 
             (labs / "spark-chip.json").write_text(
                 json.dumps({"schema_version": "spark-chip.v1", "chip_name": "labs", "capabilities": []}),
@@ -677,6 +679,16 @@ class SparkSystemMapTests(unittest.TestCase):
             )
             (labs / "runs" / "demo" / "benchmark" / "manifest.json").write_text(
                 '{"private": "benchmark body should stay out"}',
+                encoding="utf-8",
+            )
+            (labs / "runs" / "demo" / "autoloop" / "policy.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "spark-autoloop-policy.v1",
+                        "network_publication_allowed": False,
+                        "rollback_condition": "private rollback body should stay out",
+                    }
+                ),
                 encoding="utf-8",
             )
 
@@ -712,6 +724,29 @@ class SparkSystemMapTests(unittest.TestCase):
                 "// private validation",
                 encoding="utf-8",
             )
+            (swarm / "templates" / "creator-system-network-proposal" / "publication-approval.placeholder.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "spark_swarm.creator_system_publication_approval.v1",
+                        "status": "not_approved",
+                        "network_publication_allowed": False,
+                        "required_before_approval": ["privacy_review", "rollback_review"],
+                        "stop_ship": {"blocked_reasons": ["publication_approval_not_granted"]},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (swarm / "templates" / "creator-system-network-proposal" / "github-ruleset-review.current.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "spark_swarm.creator_system_github_ruleset_review.v1",
+                        "status": "blocked_unprotected",
+                        "ruleset_review_passed": False,
+                        "stop_ship": {"blocked_reasons": ["rulesets_missing"]},
+                    }
+                ),
+                encoding="utf-8",
+            )
             (swarm / "collective" / "demo" / "promotion-packet.json").write_text(
                 '{"private": "packet body should stay out"}',
                 encoding="utf-8",
@@ -738,15 +773,38 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertEqual(cards_by_id["creator-system:spark-domain-chip-labs"]["trust_status"], "untrusted")
         self.assertEqual(cards_by_id["creator-system:spark-domain-chip-labs"]["proof_state"], "artifact_present_unverified")
         self.assertEqual(cards_by_id["creator-system:spark-domain-chip-labs"]["trust_scope"], "none")
+        self.assertEqual(
+            cards_by_id["creator-system:spark-domain-chip-labs"]["proof_summary"]["overall_status"],
+            "blocked",
+        )
+        self.assertEqual(
+            cards_by_id["creator-system:spark-domain-chip-labs"]["proof_verdicts"]["benchmark"]["status"],
+            "present_unverified",
+        )
+        self.assertEqual(
+            cards_by_id["creator-system:spark-domain-chip-labs"]["proof_verdicts"]["publication"]["status"],
+            "blocked",
+        )
+        self.assertIn("publication_approval", cards_by_id["creator-system:spark-domain-chip-labs"]["proof_blockers"])
         self.assertIn("privacy_review_verdict", cards_by_id["creator-system:spark-domain-chip-labs"]["missing_proofs"])
         self.assertFalse(cards_by_id["creator-system:spark-domain-chip-labs"]["compiled_proofs"]["publication_approval_present"])
         self.assertEqual(cards_by_id["specialization-path:spark-swarm"]["trust_status"], "untrusted")
         self.assertEqual(cards_by_id["specialization-path:spark-swarm"]["proof_state"], "artifact_present_unverified")
+        self.assertEqual(cards_by_id["specialization-path:spark-swarm"]["proof_summary"]["overall_status"], "blocked")
+        self.assertEqual(
+            cards_by_id["specialization-path:spark-swarm"]["proof_verdicts"]["publication"]["status"],
+            "blocked",
+        )
+        self.assertEqual(
+            cards_by_id["specialization-path:spark-swarm"]["proof_verdicts"]["authority"]["status"],
+            "blocked",
+        )
         self.assertIn("benchmark_pass_fail_verdict", cards_by_id["specialization-path:spark-swarm"]["missing_proofs"])
         self.assertIn("Schema, manifest", cards_by_id["specialization-path:spark-swarm"]["trust_rule"])
         self.assertIn("Network publication approval", cards_by_id["creator-system:spark-domain-chip-labs"]["blockers"][2])
         self.assertNotIn("schema body should stay out", encoded)
         self.assertNotIn("run body should stay out", encoded)
+        self.assertNotIn("private rollback body should stay out", encoded)
         self.assertNotIn("secret command should stay out", encoded)
         self.assertNotIn("secret-key-should-stay-out", encoded)
 

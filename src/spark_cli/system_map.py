@@ -17,6 +17,7 @@ SYSTEM_MAP_SCHEMA = "spark.system_map.compiled.v0"
 AUTHORITY_VIEW_SCHEMA = "spark.authority_view.compiled.v0"
 CAPABILITY_CATALOG_SCHEMA = "spark.capability_catalog.compiled.v0"
 CAPABILITY_CARD_SCHEMA = "spark.capability_card.v1"
+CAPABILITY_PROOF_VERDICTS_SCHEMA = "spark.capability_proof_verdicts.v1"
 TRACE_INDEX_SCHEMA = "spark.trace_index.compiled.v0"
 MEMORY_MOVEMENT_INDEX_SCHEMA = "spark.memory_movement_index.compiled.v0"
 MEMORY_REVIEW_QUEUE_SCHEMA = "spark.memory_review_queue.v1"
@@ -216,6 +217,15 @@ LABS_CREATOR_RUN_ARTIFACTS = {
     "swarm_contribution": "swarm/contribution_packet.json",
 }
 
+CREATOR_REQUIRED_PROOF_LABELS = {
+    "gate": "normalized_gate_verdict",
+    "benchmark": "benchmark_pass_fail_verdict",
+    "privacy": "privacy_review_verdict",
+    "rollback": "rollback_ref",
+    "authority": "authority_scope_verdict",
+    "publication": "publication_approval",
+}
+
 SWARM_PUBLICATION_GOVERNANCE_FILES = {
     "contract_types": "packages/contracts/src/index.ts",
     "service_reads": "apps/api/src/collective/service-reads.ts",
@@ -224,6 +234,21 @@ SWARM_PUBLICATION_GOVERNANCE_FILES = {
     "github_delivery_support": "apps/api/src/collective/delivery-github-support.ts",
     "pull_request_delivery": "apps/api/src/collective/pull-request-delivery.ts",
     "github_insight_review_template": "templates/github-insight-review/README.md",
+}
+
+SWARM_CAPABILITY_VERDICT_FILES = {
+    "publication_approval": "templates/creator-system-network-proposal/publication-approval.placeholder.json",
+    "github_ruleset_review": "templates/creator-system-network-proposal/github-ruleset-review.current.json",
+    "hosted_runtime_ui_proof": "templates/creator-system-network-proposal/hosted-runtime-ui-proof.template.json",
+}
+
+SPECIALIZATION_REQUIRED_PROOF_LABELS = {
+    "benchmark": "benchmark_pass_fail_verdict",
+    "publication": "publication_approval_verdict",
+    "privacy": "privacy_review_verdict",
+    "rollback": "rollback_ref",
+    "authority": "authority_scope_verdict",
+    "trace": "trace_or_proof_ref",
 }
 
 SAFE_BUILDER_EVENT_SAMPLE_COLUMNS = (
@@ -1220,6 +1245,279 @@ def count_schema_files(path: Path, *, max_files: int = 500) -> dict[str, Any]:
     return out
 
 
+def repo_source_ref(repo_path: Path, path: Path) -> str:
+    try:
+        return path.relative_to(repo_path).as_posix()
+    except ValueError:
+        return path.name
+
+
+def proof_verdict(
+    *,
+    domain: str,
+    status: str,
+    source_kind: str,
+    source_ref: str | None = None,
+    schema_version: str | None = None,
+    raw_status: str | None = None,
+    raw_verdict: str | None = None,
+    detail_counts: dict[str, int] | None = None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": CAPABILITY_PROOF_VERDICTS_SCHEMA,
+        "domain": domain,
+        "status": status,
+        "satisfied": status == "passed",
+        "source_kind": source_kind,
+        "source_ref": source_ref,
+        "source_schema_version": schema_version,
+        "source_status": raw_status,
+        "source_verdict": raw_verdict,
+        "detail_counts": detail_counts or {},
+        "redaction": "metadata only; proof bodies, commands, labels, and raw evidence omitted",
+    }
+
+
+def missing_proof_verdict(domain: str) -> dict[str, Any]:
+    return proof_verdict(domain=domain, status="missing", source_kind="not_found")
+
+
+def source_presence_verdict(
+    *,
+    domain: str,
+    repo_path: Path,
+    source_path: Path,
+    source_kind: str,
+) -> dict[str, Any]:
+    if source_path.exists():
+        return proof_verdict(
+            domain=domain,
+            status="present_unverified",
+            source_kind=source_kind,
+            source_ref=repo_source_ref(repo_path, source_path),
+        )
+    return missing_proof_verdict(domain)
+
+
+def status_from_json_verdict(data: dict[str, Any], *, passed_keys: tuple[str, ...] = ()) -> str:
+    values = [
+        str(data.get("verdict") or "").strip().lower(),
+        str(data.get("status") or "").strip().lower(),
+    ]
+    if any(
+        value
+        and (
+            value in {"blocked", "failed", "fail", "rejected", "not_approved", "placeholder", "template_only"}
+            or value.startswith("blocked")
+            or "blocked" in value
+        )
+        for value in values
+    ):
+        return "blocked"
+    for key in passed_keys:
+        value = data.get(key)
+        if value is True:
+            return "passed"
+        if value is False:
+            return "blocked"
+
+    if any(value in {"passed", "pass", "approved", "verified", "active"} for value in values):
+        return "passed"
+    return "present_unverified"
+
+
+def json_proof_verdict(
+    *,
+    repo_path: Path,
+    rel_path: str,
+    domain: str,
+    source_kind: str,
+    passed_keys: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    path = repo_path / rel_path
+    data, error = read_json(path)
+    if error == "missing":
+        return missing_proof_verdict(domain)
+    if error:
+        return proof_verdict(
+            domain=domain,
+            status="read_error",
+            source_kind=source_kind,
+            source_ref=repo_source_ref(repo_path, path),
+        )
+    payload = as_dict(data)
+    return proof_verdict(
+        domain=domain,
+        status=status_from_json_verdict(payload, passed_keys=passed_keys),
+        source_kind=source_kind,
+        source_ref=repo_source_ref(repo_path, path),
+        schema_version=first_string(payload.get("schema_version")),
+        raw_status=first_string(payload.get("status")),
+        raw_verdict=first_string(payload.get("verdict")),
+        detail_counts={
+            "required_before_approval_count": len(as_list(payload.get("required_before_approval"))),
+            "blocked_reason_count": len(as_list(as_dict(payload.get("stop_ship")).get("blocked_reasons"))),
+        },
+    )
+
+
+def first_run_artifact(repo_path: Path, rel_path: str) -> Path | None:
+    runs_root = repo_path / "runs"
+    if not runs_root.exists():
+        return None
+    try:
+        for run_dir in sorted((child for child in runs_root.iterdir() if child.is_dir()), key=lambda item: item.name.lower()):
+            candidate = run_dir / rel_path
+            if candidate.exists():
+                return candidate
+    except Exception:
+        return None
+    return None
+
+
+def labs_creator_proof_sources(repo_path: Path) -> dict[str, Any]:
+    gate_path = repo_path / LABS_CREATOR_SURFACE_FILES["release_gate"]
+    benchmark_path = first_run_artifact(repo_path, LABS_CREATOR_RUN_ARTIFACTS["benchmark_manifest"])
+    loop_policy_path = first_run_artifact(repo_path, LABS_CREATOR_RUN_ARTIFACTS["loop_policy"])
+    proof_sources = {
+        "gate": source_presence_verdict(
+            domain="gate",
+            repo_path=repo_path,
+            source_path=gate_path,
+            source_kind="release_gate_source",
+        ),
+        "benchmark": (
+            proof_verdict(
+                domain="benchmark",
+                status="present_unverified",
+                source_kind="benchmark_manifest",
+                source_ref=repo_source_ref(repo_path, benchmark_path),
+            )
+            if benchmark_path
+            else missing_proof_verdict("benchmark")
+        ),
+        "privacy": missing_proof_verdict("privacy"),
+        "rollback": missing_proof_verdict("rollback"),
+        "authority": missing_proof_verdict("authority"),
+        "publication": missing_proof_verdict("publication"),
+    }
+
+    if loop_policy_path:
+        data, error = read_json(loop_policy_path)
+        payload = as_dict(data)
+        proof_sources["rollback"] = proof_verdict(
+            domain="rollback",
+            status="present_unverified" if not error else "read_error",
+            source_kind="autoloop_rollback_policy",
+            source_ref=repo_source_ref(repo_path, loop_policy_path),
+            schema_version=first_string(payload.get("schema_version")),
+            detail_counts={"rollback_condition_present": int(bool(payload.get("rollback_condition")))},
+        )
+        if payload.get("network_publication_allowed") is False:
+            proof_sources["publication"] = proof_verdict(
+                domain="publication",
+                status="blocked",
+                source_kind="autoloop_publication_boundary",
+                source_ref=repo_source_ref(repo_path, loop_policy_path),
+                schema_version=first_string(payload.get("schema_version")),
+                raw_status="network_publication_allowed=false",
+            )
+    return proof_sources
+
+
+def swarm_specialization_proof_sources(
+    repo_path: Path,
+    *,
+    benchmark_adapter_counts: dict[str, Any],
+    rollback_policy_counts: dict[str, Any],
+    promotion_packet_count: int,
+    evidence_ledger_count: int,
+) -> dict[str, Any]:
+    proof_sources = {
+        "benchmark": (
+            proof_verdict(domain="benchmark", status="present_unverified", source_kind="benchmark_adapter_config")
+            if benchmark_adapter_counts
+            else missing_proof_verdict("benchmark")
+        ),
+        "publication": json_proof_verdict(
+            repo_path=repo_path,
+            rel_path=SWARM_CAPABILITY_VERDICT_FILES["publication_approval"],
+            domain="publication",
+            source_kind="publication_approval",
+            passed_keys=("network_publication_allowed",),
+        ),
+        "privacy": missing_proof_verdict("privacy"),
+        "rollback": (
+            proof_verdict(domain="rollback", status="present_unverified", source_kind="rollback_policy_config")
+            if rollback_policy_counts
+            else missing_proof_verdict("rollback")
+        ),
+        "authority": json_proof_verdict(
+            repo_path=repo_path,
+            rel_path=SWARM_CAPABILITY_VERDICT_FILES["github_ruleset_review"],
+            domain="authority",
+            source_kind="github_ruleset_review",
+            passed_keys=("ruleset_review_passed",),
+        ),
+        "trace": (
+            proof_verdict(
+                domain="trace",
+                status="present_unverified",
+                source_kind="collective_packet_or_ledger",
+                detail_counts={
+                    "promotion_packet_count": int(promotion_packet_count or 0),
+                    "evidence_ledger_count": int(evidence_ledger_count or 0),
+                },
+            )
+            if promotion_packet_count or evidence_ledger_count
+            else missing_proof_verdict("trace")
+        ),
+    }
+    return proof_sources
+
+
+def capability_proof_summary(
+    proof_verdicts: dict[str, Any],
+    required_labels: dict[str, str],
+) -> dict[str, Any]:
+    counts: Counter[str] = Counter()
+    passed: list[str] = []
+    blocked: list[str] = []
+    unverified: list[str] = []
+    missing: list[str] = []
+
+    for domain, label in required_labels.items():
+        verdict = as_dict(proof_verdicts.get(domain))
+        status = str(verdict.get("status") or "missing")
+        counts[status] += 1
+        if status == "passed":
+            passed.append(label)
+        elif status == "blocked":
+            blocked.append(label)
+        elif status == "present_unverified":
+            unverified.append(label)
+        else:
+            missing.append(label)
+
+    if blocked:
+        overall = "blocked"
+    elif missing or unverified:
+        overall = "missing_required_verdicts"
+    else:
+        overall = "passed"
+
+    return {
+        "overall_status": overall,
+        "required_proofs": list(required_labels.values()),
+        "passed_proofs": passed,
+        "blocked_proofs": blocked,
+        "unverified_proofs": unverified,
+        "missing_proofs": missing,
+        "unsatisfied_proofs": [*blocked, *unverified, *missing],
+        "status_counts": dict(sorted(counts.items())),
+    }
+
+
 def inspect_labs_creator_surface(repo_path: Path) -> dict[str, Any] | None:
     schema_dir = repo_path / "docs" / "creator_system" / "schemas"
     if not schema_dir.exists() and repo_path.name != "spark-domain-chip-labs":
@@ -1251,6 +1549,7 @@ def inspect_labs_creator_surface(repo_path: Path) -> dict[str, Any] | None:
             "run_count": run_count,
             "artifact_presence_counts": dict(sorted(artifact_counts.items())),
         },
+        "proof_sources": labs_creator_proof_sources(repo_path),
         "claim_boundary": (
             "Creator-system schemas and run artifacts are compatibility and review evidence; "
             "they are not network publication approval or durable memory truth."
@@ -1328,6 +1627,13 @@ def inspect_swarm_specialization_surface(repo_path: Path) -> dict[str, Any] | No
             "promotion_packet_count": promotion_packet_count,
             "evidence_ledger_count": evidence_ledger_count,
         },
+        "proof_sources": swarm_specialization_proof_sources(
+            repo_path,
+            benchmark_adapter_counts=dict(benchmark_adapters),
+            rollback_policy_counts=dict(rollback_policies),
+            promotion_packet_count=promotion_packet_count,
+            evidence_ledger_count=evidence_ledger_count,
+        ),
         "claim_boundary": (
             "Specialization paths and collective packets are review and benchmark surfaces; "
             "network-visible publication still requires verified proof and approval gates."
@@ -1373,15 +1679,22 @@ def capability_trust_fields(
     status: str,
     compiled_proofs: dict[str, Any],
     trust_basis: list[str],
-    missing_proofs: list[str],
+    proof_verdicts: dict[str, Any],
+    required_proofs: dict[str, str],
 ) -> dict[str, Any]:
+    proof_summary = capability_proof_summary(proof_verdicts, required_proofs)
+    proof_status = proof_summary["overall_status"]
+    trust_status = "trusted" if proof_status == "passed" else "untrusted"
     return {
-        "trust_status": "untrusted",
+        "trust_status": trust_status,
         "proof_state": capability_proof_state(status),
-        "trust_scope": "none",
+        "trust_scope": "local" if trust_status == "trusted" else "none",
         "trust_basis": trust_basis,
         "compiled_proofs": compiled_proofs,
-        "missing_proofs": missing_proofs,
+        "proof_verdicts": proof_verdicts,
+        "proof_summary": proof_summary,
+        "proof_blockers": proof_summary["blocked_proofs"],
+        "missing_proofs": proof_summary["unsatisfied_proofs"],
         "trust_rule": "Schema, manifest, conformance, or local artifact presence never makes a capability trusted.",
     }
 
@@ -1403,6 +1716,7 @@ def build_capability_cards(
         schema_count = int(schema_inventory.get("schema_count") or 0)
         benchmark_manifest_count = int(artifact_counts.get("benchmark_manifest") or 0)
         review_source_count = bool_count(review_sources)
+        proof_verdicts = as_dict(surface.get("proof_sources"))
         trust = capability_trust_fields(
             status=status,
             compiled_proofs={
@@ -1411,9 +1725,11 @@ def build_capability_cards(
                 "benchmark_manifest_present": benchmark_manifest_count > 0,
                 "review_sources_present": review_source_count > 0,
                 "trace_refs_present": False,
-                "rollback_refs_present": False,
-                "privacy_review_verdict_present": False,
-                "publication_approval_present": False,
+                "rollback_refs_present": as_dict(proof_verdicts.get("rollback")).get("status") != "missing",
+                "privacy_review_verdict_present": as_dict(proof_verdicts.get("privacy")).get("status")
+                not in {None, "missing"},
+                "publication_approval_present": as_dict(proof_verdicts.get("publication")).get("status")
+                == "passed",
             },
             trust_basis=[
                 basis
@@ -1425,14 +1741,8 @@ def build_capability_cards(
                 )
                 if present
             ],
-            missing_proofs=[
-                "normalized_gate_verdict",
-                "benchmark_pass_fail_verdict",
-                "privacy_review_verdict",
-                "rollback_ref",
-                "authority_scope_verdict",
-                "publication_approval",
-            ],
+            proof_verdicts=proof_verdicts,
+            required_proofs=CREATOR_REQUIRED_PROOF_LABELS,
         )
         cards.append(
             {
@@ -1464,11 +1774,11 @@ def build_capability_cards(
                 "privacy_boundary": "Local creator artifacts are evidence references only; raw packet bodies are not exported.",
                 "public_boundary": "Network publication is blocked unless explicit approval and proof gates pass.",
                 "blockers": [
-                    "Gate verdicts are not normalized into the card yet.",
-                    "Privacy and rollback reviews are not compiled into the card yet.",
-                    "Network publication approval is not compiled into the card yet.",
+                    "Capability remains untrusted until every required proof domain passes.",
+                    "Present benchmark, gate, or rollback metadata is still unverified unless a pass/fail verdict exists.",
+                    "Network publication approval is blocked or missing unless the publication proof verdict passes.",
                 ],
-                "next_action": "Normalize release-gate, operator-review, product-runtime-review, privacy, and rollback verdicts.",
+                "next_action": "Resolve the first unsatisfied proof in proof_summary.unsatisfied_proofs.",
             }
         )
 
@@ -1486,6 +1796,7 @@ def build_capability_cards(
         benchmark_adapter_counts = as_dict(config.get("benchmark_adapter_counts"))
         rollback_policy_counts = as_dict(config.get("rollback_policy_counts"))
         governance_source_count = bool_count(governance_sources)
+        proof_verdicts = as_dict(surface.get("proof_sources"))
         trust = capability_trust_fields(
             status=status,
             compiled_proofs={
@@ -1497,8 +1808,9 @@ def build_capability_cards(
                 "rollback_policy_config_present": bool(rollback_policy_counts),
                 "publication_governance_sources_present": governance_source_count > 0,
                 "trace_refs_present": False,
-                "rollback_refs_present": False,
-                "publication_approval_present": False,
+                "rollback_refs_present": as_dict(proof_verdicts.get("rollback")).get("status") != "missing",
+                "publication_approval_present": as_dict(proof_verdicts.get("publication")).get("status")
+                == "passed",
             },
             trust_basis=[
                 basis
@@ -1513,14 +1825,8 @@ def build_capability_cards(
                 )
                 if present
             ],
-            missing_proofs=[
-                "benchmark_pass_fail_verdict",
-                "publication_approval_verdict",
-                "privacy_review_verdict",
-                "rollback_ref",
-                "authority_scope_verdict",
-                "trace_or_proof_ref",
-            ],
+            proof_verdicts=proof_verdicts,
+            required_proofs=SPECIALIZATION_REQUIRED_PROOF_LABELS,
         )
         cards.append(
             {
@@ -1556,11 +1862,11 @@ def build_capability_cards(
                 "privacy_boundary": "Specialization metadata is exported without commands, labels, descriptions, or packet bodies.",
                 "public_boundary": "Collective publication requires verified proof, approval gates, and rollback review.",
                 "blockers": [
-                    "Benchmark pass/fail verdicts are not compiled into the card yet.",
-                    "Publication approval verdict is not compiled into the card yet.",
-                    "Privacy and rollback reviews are not compiled into the card yet.",
+                    "Capability remains untrusted until every required proof domain passes.",
+                    "Configured benchmark or rollback metadata is still unverified unless a pass/fail verdict exists.",
+                    "Collective publication is blocked or missing unless publication and authority verdicts pass.",
                 ],
-                "next_action": "Normalize benchmark, publication-proof, privacy, and rollback verdicts into capability status.",
+                "next_action": "Resolve the first unsatisfied proof in proof_summary.unsatisfied_proofs.",
             }
         )
 
