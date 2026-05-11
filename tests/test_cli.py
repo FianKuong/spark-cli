@@ -3274,12 +3274,12 @@ class SparkCliTests(unittest.TestCase):
         result = subprocess.CompletedProcess(
             args=["dummy"],
             returncode=1,
-            stdout="> spawner-ui@0.0.1 health:spark\n> node scripts/health-spark.mjs\nSpawner UI unhealthy: cannot reach http://127.0.0.1:5173/api/providers\n",
+            stdout="> spawner-ui@0.0.1 health:spark\n> node scripts/health-spark.mjs\nSpawner UI unhealthy: cannot reach http://127.0.0.1:3333/api/providers\n",
             stderr="",
         )
         self.assertEqual(
             summarize_command_output(result),
-            "Spawner UI unhealthy: cannot reach http://127.0.0.1:5173/api/providers",
+            "Spawner UI unhealthy: cannot reach http://127.0.0.1:3333/api/providers",
         )
 
     def test_summarize_command_output_handles_missing_streams(self) -> None:
@@ -4898,7 +4898,7 @@ class SparkCliTests(unittest.TestCase):
             self.assertIn("SPARK_BUILDER_BRIDGE_MODE=required", gateway_env)
             self.assertIn(f"SPARK_WORKSPACE_ROOT={spark_home / 'workspaces'}", gateway_env)
             self.assertIn("SPARK_ACCESS_LEVEL_DEFAULT=4", gateway_env)
-            self.assertIn("SPAWNER_UI_URL=http://127.0.0.1:5173", gateway_env)
+            self.assertIn("SPAWNER_UI_URL=http://127.0.0.1:3333", gateway_env)
             self.assertIn("TELEGRAM_RELAY_PORT=8788", gateway_env)
             self.assertIn("SPARK_TELEGRAM_PROFILE=primary", gateway_env)
             self.assertIn("LLM_PROVIDER=zai", gateway_env)
@@ -5623,7 +5623,7 @@ class SparkCliTests(unittest.TestCase):
         memory = make_module("domain-chip-memory", ["spark.memory.substrate"])
 
         class Args:
-            spawner_ui_url = "http://127.0.0.1:5173"
+            spawner_ui_url = "http://127.0.0.1:3333"
             telegram_relay_secret = None
 
         envs = build_module_envs(
@@ -5682,7 +5682,7 @@ class SparkCliTests(unittest.TestCase):
                     "telegram.admin_ids": "123",
                 },
             )
-        self.assertEqual(envs["spark-telegram-bot"]["SPAWNER_UI_URL"], "http://127.0.0.1:5173")
+        self.assertEqual(envs["spark-telegram-bot"]["SPAWNER_UI_URL"], "http://127.0.0.1:3333")
         self.assertEqual(envs["spark-telegram-bot"]["TELEGRAM_GATEWAY_MODE"], "polling")
         self.assertEqual(envs["spawner-ui"]["MISSION_CONTROL_WEBHOOK_URLS"], "http://127.0.0.1:8788/spawner-events")
         self.assertIn("TELEGRAM_RELAY_SECRET", envs["spark-telegram-bot"])
@@ -5746,7 +5746,7 @@ class SparkCliTests(unittest.TestCase):
         spawner = make_module("spawner-ui", ["mission.execution"])
 
         class Args:
-            spawner_ui_url = "http://127.0.0.1:5173"
+            spawner_ui_url = "http://127.0.0.1:3333"
             telegram_relay_secret = None
 
         with patch(
@@ -5783,7 +5783,7 @@ class SparkCliTests(unittest.TestCase):
         spawner = make_module("spawner-ui", ["mission.execution"])
 
         class Args:
-            spawner_ui_url = "http://127.0.0.1:5173"
+            spawner_ui_url = "http://127.0.0.1:3333"
             telegram_relay_secret = None
             llm_provider = "zai"
             zai_base_url = "https://api.z.ai/api/coding/paas/v4/"
@@ -5826,7 +5826,7 @@ class SparkCliTests(unittest.TestCase):
         spawner = make_module("spawner-ui", ["mission.execution"])
 
         class Args:
-            spawner_ui_url = "http://127.0.0.1:5173"
+            spawner_ui_url = "http://127.0.0.1:3333"
             telegram_relay_secret = None
             llm_provider = None
             chat_llm_provider = "zai"
@@ -5882,7 +5882,7 @@ class SparkCliTests(unittest.TestCase):
         spawner = make_module("spawner-ui", ["mission.execution"])
 
         class Args:
-            spawner_ui_url = "http://127.0.0.1:5173"
+            spawner_ui_url = "http://127.0.0.1:3333"
             telegram_relay_secret = None
             llm_provider = "openai"
             chat_llm_provider = None
@@ -5919,7 +5919,7 @@ class SparkCliTests(unittest.TestCase):
         spawner = make_module("spawner-ui", ["mission.execution"])
 
         class Args:
-            spawner_ui_url = "http://127.0.0.1:5173"
+            spawner_ui_url = "http://127.0.0.1:3333"
             telegram_relay_secret = None
             llm_provider = "codex"
             chat_llm_provider = None
@@ -6095,7 +6095,7 @@ class SparkCliTests(unittest.TestCase):
             path=Path("C:/tmp/http-target"),
             manifest={
                 "module": {"name": "http-target", "version": "0.1.0", "kind": "service", "plane": "execution"},
-                "run": {"default": {"ready_check": "http://127.0.0.1:5173/api/providers"}},
+                "run": {"default": {"ready_check": "http://127.0.0.1:3333/api/providers"}},
                 "healthcheck": {"timeout_seconds": 1},
             },
         )
@@ -6106,7 +6106,7 @@ class SparkCliTests(unittest.TestCase):
             ready, detail = wait_for_ready_check(module)
 
         self.assertFalse(ready)
-        self.assertIn("http://127.0.0.1:5173/api/providers did not become ready within 1s", detail)
+        self.assertIn("http://127.0.0.1:3333/api/providers did not become ready within 1s", detail)
         self.assertIn("last error:", detail)
 
     def test_wait_for_ready_check_retries_transient_http_reset(self) -> None:
@@ -6115,7 +6115,7 @@ class SparkCliTests(unittest.TestCase):
             path=Path("C:/tmp/http-target"),
             manifest={
                 "module": {"name": "http-target", "version": "0.1.0", "kind": "service", "plane": "execution"},
-                "run": {"default": {"ready_check": "http://127.0.0.1:5173/api/providers"}},
+                "run": {"default": {"ready_check": "http://127.0.0.1:3333/api/providers"}},
                 "healthcheck": {"timeout_seconds": 3},
             },
         )
@@ -6135,7 +6135,7 @@ class SparkCliTests(unittest.TestCase):
             ready, detail = wait_for_ready_check(module)
 
         self.assertTrue(ready)
-        self.assertEqual(detail, "http://127.0.0.1:5173/api/providers")
+        self.assertEqual(detail, "http://127.0.0.1:3333/api/providers")
 
     def test_wait_for_ready_check_stops_when_http_process_exits(self) -> None:
         module = Module(
@@ -6143,7 +6143,7 @@ class SparkCliTests(unittest.TestCase):
             path=Path("C:/tmp/http-target"),
             manifest={
                 "module": {"name": "http-target", "version": "0.1.0", "kind": "service", "plane": "execution"},
-                "run": {"default": {"ready_check": "http://127.0.0.1:5173/api/providers"}},
+                "run": {"default": {"ready_check": "http://127.0.0.1:3333/api/providers"}},
                 "healthcheck": {"timeout_seconds": 60},
             },
         )
@@ -6389,7 +6389,7 @@ class SparkCliTests(unittest.TestCase):
 
     def test_listening_pid_for_tcp_port_parses_windows_netstat(self) -> None:
         netstat = """
-  TCP    127.0.0.1:5173         0.0.0.0:0              LISTENING       111
+  TCP    127.0.0.1:3333         0.0.0.0:0              LISTENING       111
   TCP    127.0.0.1:8788         0.0.0.0:0              LISTENING       222
 """
         completed = subprocess.CompletedProcess(["netstat"], 0, stdout=netstat, stderr="")
@@ -6421,7 +6421,7 @@ class SparkCliTests(unittest.TestCase):
                 path=Path(tmp_dir),
                 manifest={
                     "module": {"name": "slow-spawner", "version": "0.1.0", "kind": "app", "plane": "execution"},
-                    "run": {"default": {"command": "npm run dev", "ready_check": "http://127.0.0.1:5173"}},
+                    "run": {"default": {"command": "npm run dev", "ready_check": "http://127.0.0.1:3333"}},
                 },
             )
 
@@ -6481,7 +6481,7 @@ class SparkCliTests(unittest.TestCase):
                 path=root,
                 manifest={
                     "module": {"name": "spawner-ui", "version": "0.0.1", "kind": "app", "plane": "execution"},
-                    "run": {"default": {"command": "npm run dev -- --host 127.0.0.1", "ready_check": "http://127.0.0.1:5173/api/providers"}},
+                    "run": {"default": {"command": "npm run dev -- --host 127.0.0.1", "ready_check": "http://127.0.0.1:3333/api/providers"}},
                 },
             )
 
@@ -6519,7 +6519,7 @@ class SparkCliTests(unittest.TestCase):
             manifest={
                 "module": {"name": "spawner-ui", "version": "0.0.1", "kind": "app", "plane": "execution"},
                 "healthcheck": {"command": "npm run health:spark"},
-                "run": {"default": {"ready_check": "http://127.0.0.1:5173/api/providers"}},
+                "run": {"default": {"ready_check": "http://127.0.0.1:3333/api/providers"}},
             },
         )
 
@@ -6571,7 +6571,7 @@ class SparkCliTests(unittest.TestCase):
                 path=Path(tmp_dir),
                 manifest={
                     "module": {"name": "failed-spawner", "version": "0.1.0", "kind": "app", "plane": "execution"},
-                    "run": {"default": {"command": "npm run dev", "ready_check": "http://127.0.0.1:5173"}},
+                    "run": {"default": {"command": "npm run dev", "ready_check": "http://127.0.0.1:3333"}},
                 },
             )
 
@@ -9366,7 +9366,7 @@ class SparkCliTests(unittest.TestCase):
     def test_ready_check_headers_use_hosted_ui_key_for_loopback_only(self) -> None:
         with patch.dict(os.environ, {"SPARK_UI_API_KEY": "ui-key", "SPARK_BRIDGE_API_KEY": "bridge-key"}, clear=True):
             self.assertEqual(
-                ready_check_headers("http://127.0.0.1:5173/api/providers"),
+                ready_check_headers("http://127.0.0.1:3333/api/providers"),
                 {"x-spawner-ui-key": "ui-key", "x-api-key": "ui-key"},
             )
             self.assertEqual(ready_check_headers("https://spark-live.example.test/api/providers"), {})

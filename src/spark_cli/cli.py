@@ -3345,7 +3345,7 @@ def telegram_profile_webhook_urls(setup_state: dict[str, Any] | None = None) -> 
 
 
 def default_telegram_webhook_url(spawner_ui_url: str | None) -> str:
-    relay_base = spawner_ui_url or "http://127.0.0.1:5173"
+    relay_base = spawner_ui_url or "http://127.0.0.1:3333"
     parsed = urllib.parse.urlparse(relay_base)
     scheme = parsed.scheme or "http"
     host = parsed.hostname or "127.0.0.1"
@@ -3380,7 +3380,7 @@ def build_module_envs(args: argparse.Namespace, modules_by_name: dict[str, Modul
         "SPARK_BUILDER_HOME": str(builder_home),
         "SPARK_BUILDER_PYTHON": str(Path(sys.executable)),
         "SPARK_BUILDER_BRIDGE_MODE": "required",
-        "SPAWNER_UI_URL": args.spawner_ui_url or "http://127.0.0.1:5173",
+        "SPAWNER_UI_URL": args.spawner_ui_url or "http://127.0.0.1:3333",
         "TELEGRAM_GATEWAY_MODE": "polling",
         "TELEGRAM_RELAY_PORT": "8788",
         "SPARK_TELEGRAM_PROFILE": primary_telegram_profile(),
@@ -8783,7 +8783,7 @@ def collect_simple_fix_payload(target: str) -> dict[str, Any]:
                     "detail": (
                         str(spawner_module.get("detail"))
                         if isinstance(spawner_module, dict) and spawner_module.get("detail")
-                        else "Spawner UI should answer on http://127.0.0.1:5173."
+                        else "Spawner UI should answer on http://127.0.0.1:3333."
                     ),
                     "repair": "spark restart spawner-ui",
                 },
@@ -10134,7 +10134,7 @@ def hosted_spawner_base_url() -> str:
         os.environ.get("SPARK_SPAWNER_PORT")
         or os.environ.get("PORT")
         or os.environ.get("SPARK_PORT")
-        or "5173"
+        or "3333"
     )
     return f"http://127.0.0.1:{str(port).strip()}"
 
@@ -11165,7 +11165,7 @@ def spawner_runtime_port(module: Module, env: dict[str, str]) -> str:
         parsed = urllib.parse.urlparse(ready_check)
         if parsed.port:
             return str(parsed.port)
-    return "5173"
+    return "3333"
 
 
 def spawner_runtime_health_url(module: Module, env: dict[str, str]) -> str:
@@ -13122,7 +13122,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--graphiti-kuzu-db-path",
         help="Override the local Graphiti/Kuzu sidecar database path. Defaults to Builder home sidecars/graphiti/kuzu.",
     )
-    setup_parser.add_argument("--spawner-ui-url", default="http://127.0.0.1:5173")
+    setup_parser.add_argument("--spawner-ui-url", default="http://127.0.0.1:3333")
     setup_parser.add_argument("--llm-provider", choices=LLM_PROVIDER_CHOICES, help="Default provider for Agent and Mission unless a role-specific provider is set")
     setup_parser.add_argument("--agent-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Provider for the Spark Agent: chat, runtime reasoning, memory, and recall")
     setup_parser.add_argument("--chat-llm-provider", choices=LLM_PROVIDER_CHOICES, help="Provider for Telegram chat replies")
