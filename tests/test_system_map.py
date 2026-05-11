@@ -287,11 +287,15 @@ class SparkSystemMapTests(unittest.TestCase):
         builder_item = next(
             item for item in repo_board["duplicate_truths"]["items"] if item["id"] == "builder-release-vs-nonrelease-installed-source"
         )
+        self.assertEqual(builder_item["classification"], "installed_legacy_backlog")
+        self.assertEqual(builder_item["severity"], "warning")
         self.assertEqual(builder_item["canonical_path"], str(builder_release))
         self.assertIn("Promoted release source", builder_item["evidence"])
         self.assertEqual(builder_item["evidence_details"]["desktop_backlog_source"]["aoc_command_marker_count"], 6)
         self.assertEqual(builder_item["evidence_details"]["promoted_release_source"]["aoc_command_marker_count"], 6)
         self.assertTrue(builder_item["evidence_details"]["promoted_release_source"]["trace_ref_argument_present"])
+        self.assertTrue(builder_item["evidence_details"]["release_ready"])
+        self.assertTrue(builder_item["evidence_details"]["runtime_clean"])
         self.assertEqual(
             builder_item["evidence_details"]["source_truth_policy"],
             "Release Builder source is canonical for the current Spark OS line; Desktop Builder is backlog until curated or replaced.",

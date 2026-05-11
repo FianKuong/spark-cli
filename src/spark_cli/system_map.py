@@ -3819,13 +3819,35 @@ def build_duplicate_truths(system_map: dict[str, Any]) -> dict[str, Any]:
         desktop_audit = builder_source_audit(builder_owner_source)
         command_count = int(runtime_audit.get("aoc_command_marker_count") or 0)
         trace_ref_present = bool(runtime_audit.get("trace_ref_argument_present"))
+        release_ready = command_count == len(BUILDER_AOC_COMMAND_MARKERS) and trace_ref_present
+        runtime_clean = (
+            int(runtime_audit.get("dirty_tracked_count") or 0) == 0
+            and int(runtime_audit.get("untracked_count") or 0) == 0
+        )
         duplicate_dirty = int(duplicate_audit.get("dirty_tracked_count") or 0) + int(duplicate_audit.get("untracked_count") or 0)
+        builder_classification = "installed_legacy_backlog" if release_ready and runtime_clean else "active_legacy"
+        builder_severity = "warning" if builder_classification == "installed_legacy_backlog" else "critical"
+        builder_risk = (
+            "Operators can patch the non-release duplicate and believe they changed active Builder truth, but installed module "
+            "metadata and generated Telegram config point at the clean release source."
+            if builder_classification == "installed_legacy_backlog"
+            else "Operators can patch the dirty Desktop owner checkout or non-release duplicate and believe they changed the active Builder truth."
+        )
+        builder_next_action = (
+            "Keep the release Builder source canonical. Treat the non-release installed-looking path and Desktop checkout as "
+            "read-only backlog until a targeted feature slice is re-derived onto the clean release line."
+            if builder_classification == "installed_legacy_backlog"
+            else (
+                "Treat the release Builder source as canonical for the current Spark OS line. Curate or replace the dirty "
+                "Desktop owner checkout separately, and do not merge its backlog wholesale into the promoted source."
+            )
+        )
         items.append(
             duplicate_truth_item(
                 item_id="builder-release-vs-nonrelease-installed-source",
                 fact="Promoted Builder release source and legacy Builder sources",
-                classification="active_legacy",
-                severity="critical",
+                classification=builder_classification,
+                severity=builder_severity,
                 owner_repo="spark-intelligence-builder-release",
                 canonical_path=str(Path(builder_runtime_artifact)),
                 duplicate_path=str(builder_nonrelease),
@@ -3835,11 +3857,8 @@ def build_duplicate_truths(system_map: dict[str, Any]) -> dict[str, Any]:
                     f"Promoted release source exposes {command_count}/{len(BUILDER_AOC_COMMAND_MARKERS)} AOC command markers"
                     f"{' with trace-ref support' if trace_ref_present else ' without detected trace-ref support'}."
                 ),
-                risk="Operators can patch the dirty Desktop owner checkout or non-release duplicate and believe they changed the active Builder truth.",
-                next_safe_action=(
-                    "Treat the release Builder source as canonical for the current Spark OS line. Curate or replace the dirty "
-                    "Desktop owner checkout separately, and do not merge its backlog wholesale into the promoted source."
-                ),
+                risk=builder_risk,
+                next_safe_action=builder_next_action,
                 verification_command="spark verify --onboarding --json",
                 rollback="Repoint installed module metadata only after another Builder source passes the same AOC, trace, and live proof gates.",
                 evidence_details={
@@ -3850,6 +3869,8 @@ def build_duplicate_truths(system_map: dict[str, Any]) -> dict[str, Any]:
                     "onboarding_gate": "builder_runtime_source",
                     "local_source_probe": "Insert repo src on sys.path before importing spark_intelligence.cli build_parser.",
                     "source_truth_policy": "Release Builder source is canonical for the current Spark OS line; Desktop Builder is backlog until curated or replaced.",
+                    "release_ready": release_ready,
+                    "runtime_clean": runtime_clean,
                 },
             )
         )
