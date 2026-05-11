@@ -181,12 +181,13 @@ class SparkSystemMapTests(unittest.TestCase):
             state = spark_home / "state"
             builder_release = spark_home / "modules" / "spark-intelligence-builder-release" / "source"
             builder_legacy = spark_home / "modules" / "spark-intelligence-builder" / "source"
+            builder_owner = desktop / "spark-intelligence-builder"
             spawner_source = spark_home / "modules" / "spawner-ui" / "source"
             spawner_audit_route = spawner_source / "src" / "routes" / "api" / "system" / "state-root"
             systems_repo = desktop / "spark-intelligence-systems"
             registry = root / "registry.json"
 
-            for path in [desktop, state, builder_release, builder_legacy, spawner_source / ".spawner", spawner_audit_route, systems_repo]:
+            for path in [desktop, state, builder_release, builder_legacy, builder_owner, spawner_source / ".spawner", spawner_audit_route, systems_repo]:
                 path.mkdir(parents=True)
             builder_cli_markers = '\n'.join(
                 [
@@ -199,7 +200,7 @@ class SparkSystemMapTests(unittest.TestCase):
                     '"--trace-ref"',
                 ]
             )
-            for builder_path in [builder_release, builder_legacy]:
+            for builder_path in [builder_release, builder_legacy, builder_owner]:
                 cli_dir = builder_path / "src" / "spark_intelligence"
                 cli_dir.mkdir(parents=True)
                 (cli_dir / "cli.py").write_text(builder_cli_markers, encoding="utf-8")
@@ -245,8 +246,15 @@ class SparkSystemMapTests(unittest.TestCase):
         builder_item = next(
             item for item in repo_board["duplicate_truths"]["items"] if item["id"] == "builder-release-vs-nonrelease-installed-source"
         )
-        self.assertEqual(builder_item["evidence_details"]["canonical_release"]["aoc_command_marker_count"], 6)
-        self.assertTrue(builder_item["evidence_details"]["canonical_release"]["trace_ref_argument_present"])
+        self.assertEqual(builder_item["canonical_path"], str(builder_owner))
+        self.assertIn("runtime artifact", builder_item["evidence"])
+        self.assertEqual(builder_item["evidence_details"]["owner_source"]["aoc_command_marker_count"], 6)
+        self.assertEqual(builder_item["evidence_details"]["installed_runtime_artifact"]["aoc_command_marker_count"], 6)
+        self.assertTrue(builder_item["evidence_details"]["installed_runtime_artifact"]["trace_ref_argument_present"])
+        self.assertEqual(
+            builder_item["evidence_details"]["source_truth_policy"],
+            "Owner repo is canonical; installed runtime artifacts must be rebuildable from owner source.",
+        )
         self.assertEqual(
             builder_item["evidence_details"]["local_source_probe"],
             "Insert repo src on sys.path before importing spark_intelligence.cli build_parser.",

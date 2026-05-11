@@ -3425,43 +3425,46 @@ def build_duplicate_truths(system_map: dict[str, Any]) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
 
     builder_installed = as_dict(installed_modules.get("spark-intelligence-builder"))
-    builder_canonical = first_string(builder_installed.get("path"), builder_installed.get("source"))
+    builder_runtime_artifact = first_string(builder_installed.get("path"), builder_installed.get("source"))
+    builder_owner_source = desktop / "spark-intelligence-builder"
     builder_nonrelease = spark_home / "modules" / "spark-intelligence-builder" / "source"
-    if builder_canonical and builder_nonrelease.exists() and str(builder_nonrelease) != builder_canonical:
-        canonical_audit = builder_source_audit(Path(builder_canonical))
+    if builder_runtime_artifact and builder_nonrelease.exists() and str(builder_nonrelease) != builder_runtime_artifact:
+        runtime_audit = builder_source_audit(Path(builder_runtime_artifact))
         duplicate_audit = builder_source_audit(builder_nonrelease)
-        desktop_audit = builder_source_audit(desktop / "spark-intelligence-builder")
-        command_count = int(canonical_audit.get("aoc_command_marker_count") or 0)
-        trace_ref_present = bool(canonical_audit.get("trace_ref_argument_present"))
+        desktop_audit = builder_source_audit(builder_owner_source)
+        command_count = int(runtime_audit.get("aoc_command_marker_count") or 0)
+        trace_ref_present = bool(runtime_audit.get("trace_ref_argument_present"))
         duplicate_dirty = int(duplicate_audit.get("dirty_tracked_count") or 0) + int(duplicate_audit.get("untracked_count") or 0)
         items.append(
             duplicate_truth_item(
                 item_id="builder-release-vs-nonrelease-installed-source",
-                fact="Builder runtime source used by Telegram",
+                fact="Builder source truth and installed runtime artifact",
                 classification="active_legacy",
                 severity="critical",
                 owner_repo="spark-intelligence-builder",
-                canonical_path=builder_canonical,
+                canonical_path=str(builder_owner_source),
                 duplicate_path=str(builder_nonrelease),
                 evidence=(
-                    "Installed module metadata points at the release Builder source while another installed-looking Builder source exists. "
-                    f"Canonical release source exposes {command_count}/{len(BUILDER_AOC_COMMAND_MARKERS)} AOC command markers"
+                    "Installed module metadata points at a Builder runtime artifact while another installed-looking Builder source exists. "
+                    "The Desktop owner repo remains the canonical source of truth. "
+                    f"Current runtime artifact exposes {command_count}/{len(BUILDER_AOC_COMMAND_MARKERS)} AOC command markers"
                     f"{' with trace-ref support' if trace_ref_present else ' without detected trace-ref support'}."
                 ),
-                risk="Operators can patch the non-canonical source and believe Telegram is using it.",
+                risk="Operators can patch an installed artifact or legacy duplicate and believe they changed the Builder source truth.",
                 next_safe_action=(
-                    "Keep the release installed source canonical; inspect the duplicate dirty worktree by feature family, "
-                    "port only proven missing behavior, then demote the duplicate after proof."
+                    "Treat the Desktop Builder repo as canonical source, keep the release install as a temporary runtime artifact, "
+                    "port only proven runtime behavior into the owner repo, then rebuild the installed artifact from that source."
                 ),
                 verification_command="spark verify --onboarding --json",
-                rollback="Keep the duplicate source read-only until release install proof remains green.",
+                rollback="Keep installed artifacts read-only for runtime stability until the owner repo is clean and proof remains green.",
                 evidence_details={
-                    "canonical_release": canonical_audit,
+                    "owner_source": desktop_audit,
+                    "installed_runtime_artifact": runtime_audit,
                     "duplicate_nonrelease": duplicate_audit,
-                    "desktop_owner": desktop_audit,
                     "duplicate_dirty_file_count": duplicate_dirty,
                     "onboarding_gate": "builder_runtime_source",
                     "local_source_probe": "Insert repo src on sys.path before importing spark_intelligence.cli build_parser.",
+                    "source_truth_policy": "Owner repo is canonical; installed runtime artifacts must be rebuildable from owner source.",
                 },
             )
         )
