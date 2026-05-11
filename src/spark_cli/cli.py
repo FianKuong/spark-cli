@@ -5095,6 +5095,94 @@ def refresh_telegram_profile_envs(modules: dict[str, Module]) -> None:
         write_generated_env(generated_module_env_path(gateway, normalized), refreshed_env)
 
 
+def builder_runtime_env_refs_from_installed(installed: object) -> dict[str, str]:
+    builder_path = installed_record_path(installed, "spark-intelligence-builder")
+    if builder_path is None:
+        return {}
+    return {
+        "SPARK_BUILDER_REPO": str(builder_path),
+        "SPARK_BUILDER_HOME": str(spark_builder_home()),
+        "SPARK_BUILDER_PYTHON": str(Path(sys.executable)),
+        "SPARK_BUILDER_BRIDGE_MODE": "required",
+    }
+
+
+def telegram_generated_env_paths(setup_state: dict[str, Any] | None = None) -> list[Path]:
+    paths = [MODULE_CONFIG_DIR / "spark-telegram-bot.env"]
+    state = setup_state if isinstance(setup_state, dict) else load_json(CONFIG_PATH, {})
+    profile_names: set[str] = set()
+    profiles = state.get("telegram_profiles") if isinstance(state, dict) else None
+    if isinstance(profiles, dict):
+        for profile, profile_state in profiles.items():
+            normalized = normalize_telegram_profile(str(profile))
+            if isinstance(profile_state, dict) and not telegram_profile_is_default(normalized):
+                profile_names.add(normalized)
+    if MODULE_CONFIG_DIR.exists():
+        for path in MODULE_CONFIG_DIR.glob("spark-telegram-bot.*.env"):
+            prefix = "spark-telegram-bot."
+            suffix = ".env"
+            name = path.name
+            if name.startswith(prefix) and name.endswith(suffix):
+                normalized = normalize_telegram_profile(name[len(prefix):-len(suffix)])
+                if not telegram_profile_is_default(normalized):
+                    profile_names.add(normalized)
+    for profile in sorted(profile_names):
+        paths.append(MODULE_CONFIG_DIR / f"spark-telegram-bot.{profile}.env")
+    return paths
+
+
+def refresh_telegram_builder_runtime_refs(
+    installed: object | None = None,
+    setup_state: dict[str, Any] | None = None,
+) -> list[Path]:
+    refs = builder_runtime_env_refs_from_installed(installed if installed is not None else load_json(REGISTRY_PATH, {}))
+    if not refs:
+        return []
+    changed: list[Path] = []
+    for path in telegram_generated_env_paths(setup_state):
+        if not path.exists():
+            continue
+        current = read_generated_env(path)
+        if not current:
+            continue
+        next_values = dict(current)
+        next_values.update(refs)
+        if next_values != current:
+            write_generated_env(path, next_values)
+            changed.append(path)
+    return changed
+
+
+def runtime_path_values_equal(actual: str, expected: str) -> bool:
+    if not actual or not expected:
+        return actual == expected
+    try:
+        actual_path = os.path.normcase(os.path.normpath(os.fspath(Path(actual).expanduser())))
+        expected_path = os.path.normcase(os.path.normpath(os.fspath(Path(expected).expanduser())))
+    except (OSError, RuntimeError, ValueError):
+        return actual == expected
+    return actual_path == expected_path
+
+
+def builder_runtime_ref_errors(installed: object, gateway_env: dict[str, str]) -> list[str]:
+    refs = builder_runtime_env_refs_from_installed(installed)
+    if not refs:
+        return ["spark-intelligence-builder is not installed."]
+    errors: list[str] = []
+    for key in ("SPARK_BUILDER_REPO", "SPARK_BUILDER_BRIDGE_MODE"):
+        expected = refs[key]
+        actual = gateway_env.get(key, "")
+        if key in {"SPARK_BUILDER_REPO", "SPARK_BUILDER_HOME", "SPARK_BUILDER_PYTHON"}:
+            matches = runtime_path_values_equal(actual, expected)
+            if not matches:
+                actual_label = public_local_path_ref(actual) if actual else "missing"
+                expected_label = public_local_path_ref(expected)
+                errors.append(f"{key}={actual_label}; expected {expected_label}")
+        elif actual != expected:
+            errors.append(f"{key}={actual or 'missing'}; expected {expected}")
+    return errors
+
+
 def print_setup_summary(
     args: argparse.Namespace,
     ingress_owner: Module,
@@ -9599,6 +9687,20 @@ def collect_verify_payload(*, deep: bool = False) -> dict[str, Any]:
             "repair": "spark setup telegram-starter",
         }
     )
+    builder_ref_errors = builder_runtime_ref_errors(installed, gateway_env)
+    checks.append(
+        {
+            "name": "builder_runtime_source",
+            "ok": not builder_ref_errors,
+            "required": True,
+            "detail": (
+                "Telegram generated runtime config points at the installed Builder module."
+                if not builder_ref_errors
+                else "; ".join(builder_ref_errors[:4])
+            ),
+            "repair": "spark update spark-intelligence-builder --skip-dirty --skip-install-commands",
+        }
+    )
     voice_expected = VOICE_MODULE_NAME in expected_modules or bool(
         isinstance(setup_state, dict)
         and isinstance(setup_state.get("voice"), dict)
@@ -12641,6 +12743,9 @@ def cmd_update(args: argparse.Namespace) -> int:
         )
         sync_generated_env_to_module(module)
         print(f"Updated {module.name} from {module.path}")
+    refreshed = refresh_telegram_builder_runtime_refs(load_json(REGISTRY_PATH, {}))
+    if refreshed:
+        print(f"Refreshed Builder runtime refs in {len(refreshed)} generated Telegram config file(s).")
     return 0
 
 

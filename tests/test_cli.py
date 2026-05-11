@@ -186,6 +186,7 @@ from spark_cli.cli import (
     print_install_summary,
     process_runtime_detail,
     provider_secret_env_blocklist,
+    refresh_telegram_builder_runtime_refs,
     runtime_env_contract_errors,
     format_start_warning,
     post_ready_watch_seconds,
@@ -4893,6 +4894,7 @@ class SparkCliTests(unittest.TestCase):
             builder_env = (module_config_dir / "spark-intelligence-builder.env").read_text(encoding="utf-8")
             self.assertNotIn("BOT_TOKEN=123456:test-token", gateway_env)
             self.assertIn("ADMIN_TELEGRAM_IDS=111,222", gateway_env)
+            self.assertIn(f"SPARK_BUILDER_REPO={installed['spark-intelligence-builder']['path']}", gateway_env)
             self.assertIn(f"SPARK_BUILDER_HOME={expected_builder_home}", gateway_env)
             self.assertIn(f"SPARK_BUILDER_PYTHON={Path(sys.executable)}", gateway_env)
             self.assertIn("SPARK_BUILDER_BRIDGE_MODE=required", gateway_env)
@@ -5614,6 +5616,55 @@ class SparkCliTests(unittest.TestCase):
         module = make_module("spawner-ui", ["mission.execution"])
         self.assertEqual(generated_module_env_path(module), MODULE_CONFIG_DIR / "spawner-ui.env")
 
+    def test_refresh_telegram_builder_runtime_refs_updates_base_and_profiles(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            state_dir = root / "state"
+            module_config_dir = root / "config" / "modules"
+            module_config_dir.mkdir(parents=True)
+            installed_builder = root / "modules" / "spark-intelligence-builder-release" / "source"
+            stale_builder = root / "Desktop" / "spark-intelligence-builder"
+            base_env = module_config_dir / "spark-telegram-bot.env"
+            profile_env = module_config_dir / "spark-telegram-bot.testerthebester.env"
+            base_env.write_text(
+                "\n".join(
+                    [
+                        f"SPARK_BUILDER_REPO={stale_builder}",
+                        "SPARK_BUILDER_BRIDGE_MODE=optional",
+                        "TELEGRAM_RELAY_PORT=8788",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            profile_env.write_text(
+                "\n".join(
+                    [
+                        f"SPARK_BUILDER_REPO={stale_builder}",
+                        "SPARK_TELEGRAM_PROFILE=testerthebester",
+                        "TELEGRAM_RELAY_PORT=8791",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            setup_state = {"telegram_profiles": {"testerthebester": {"relay_port": 8791}}}
+            installed = {"spark-intelligence-builder": {"path": str(installed_builder)}}
+            with patch("spark_cli.cli.MODULE_CONFIG_DIR", module_config_dir), \
+                 patch("spark_cli.cli.STATE_DIR", state_dir):
+                changed = refresh_telegram_builder_runtime_refs(installed, setup_state)
+                refreshed_base = read_generated_env(base_env)
+                refreshed_profile = read_generated_env(profile_env)
+
+        self.assertEqual(set(changed), {base_env, profile_env})
+        self.assertEqual(refreshed_base["SPARK_BUILDER_REPO"], str(installed_builder))
+        self.assertEqual(refreshed_profile["SPARK_BUILDER_REPO"], str(installed_builder))
+        self.assertEqual(refreshed_base["SPARK_BUILDER_HOME"], str(state_dir / "spark-intelligence"))
+        self.assertEqual(refreshed_profile["SPARK_BUILDER_PYTHON"], str(Path(sys.executable)))
+        self.assertEqual(refreshed_base["SPARK_BUILDER_BRIDGE_MODE"], "required")
+        self.assertEqual(refreshed_profile["TELEGRAM_RELAY_PORT"], "8791")
+
     def test_build_module_envs_routes_telegram_secret_only_to_gateway(self) -> None:
         gateway = make_module("spark-telegram-bot", ["telegram.ingress"])
         builder = make_module("spark-intelligence-builder", ["spark.runtime"])
@@ -5644,6 +5695,7 @@ class SparkCliTests(unittest.TestCase):
         )
         self.assertEqual(envs["spark-telegram-bot"]["BOT_TOKEN"], "abc")
         self.assertNotIn("BOT_TOKEN", envs["spawner-ui"])
+        self.assertEqual(envs["spark-telegram-bot"]["SPARK_BUILDER_REPO"], str(builder.path))
         self.assertEqual(envs["spark-telegram-bot"]["SPARK_BUILDER_HOME"], str(REGISTRY_PATH.parent / "spark-intelligence"))
         self.assertEqual(envs["spark-telegram-bot"]["SPARK_BUILDER_PYTHON"], str(Path(sys.executable)))
         self.assertEqual(envs["spark-telegram-bot"]["SPARK_BUILDER_BRIDGE_MODE"], "required")
@@ -8590,8 +8642,10 @@ class SparkCliTests(unittest.TestCase):
             if Path(path).name == "spark-telegram-bot.env":
                 return {
                     "TELEGRAM_GATEWAY_MODE": "polling",
+                    "SPARK_BUILDER_REPO": "C:/tmp/spark/modules/spark-intelligence-builder",
                     "SPARK_BUILDER_BRIDGE_MODE": "required",
                     "SPARK_BUILDER_HOME": "C:/tmp/spark/state/spark-intelligence",
+                    "SPARK_BUILDER_PYTHON": str(Path(sys.executable)),
                 }
             if Path(path).name == "spark-intelligence-builder.env":
                 return {
@@ -9421,8 +9475,10 @@ class SparkCliTests(unittest.TestCase):
                 if Path(path).name == "spark-telegram-bot.env":
                     return {
                         "TELEGRAM_GATEWAY_MODE": "polling",
+                        "SPARK_BUILDER_REPO": str(root / "modules" / "spark-intelligence-builder"),
                         "SPARK_BUILDER_BRIDGE_MODE": "required",
                         "SPARK_BUILDER_HOME": str(root / "state" / "spark-intelligence"),
+                        "SPARK_BUILDER_PYTHON": str(Path(sys.executable)),
                     }
                 if Path(path).name == "spark-intelligence-builder.env":
                     return {
@@ -9546,8 +9602,10 @@ class SparkCliTests(unittest.TestCase):
             if Path(path).name == "spark-telegram-bot.env":
                 return {
                     "TELEGRAM_GATEWAY_MODE": "polling",
+                    "SPARK_BUILDER_REPO": "C:/tmp/spark/modules/spark-intelligence-builder",
                     "SPARK_BUILDER_BRIDGE_MODE": "required",
                     "SPARK_BUILDER_HOME": "C:/tmp/spark/state/spark-intelligence",
+                    "SPARK_BUILDER_PYTHON": str(Path(sys.executable)),
                 }
             if Path(path).name == "spark-intelligence-builder.env":
                 return {
