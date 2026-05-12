@@ -8167,14 +8167,15 @@ class SparkCliTests(unittest.TestCase):
             target = None
             skip_install_commands = True
             skip_dirty = True
+            stash_local_runtime = False
+            continue_update = False
 
         def fake_update(module: Module) -> tuple[bool, str]:
-            if module.name == "spark-telegram-bot":
-                return False, "working tree has local changes; commit or stash them before updating"
             return True, "Already up to date."
 
         with patch("spark_cli.cli.resolve_installed_target_modules", return_value=[dirty, clean]), \
              patch("spark_cli.cli.print_install_summary"), \
+             patch("spark_cli.cli.dirty_update_modules", return_value=[(dirty, "M src/index.ts")]), \
              patch("spark_cli.cli.module_is_git_managed", return_value=True), \
              patch("spark_cli.cli.update_module_source", side_effect=fake_update), \
              patch("spark_cli.cli.tracked_process_keys_for_module", return_value=[]), \
@@ -8187,6 +8188,77 @@ class SparkCliTests(unittest.TestCase):
         hook.assert_called_once_with(clean, "post_install")
         record.assert_called_once()
         self.assertEqual(record.call_args.args[0], clean)
+
+    def test_cmd_update_preflights_dirty_modules_before_stopping_processes(self) -> None:
+        dirty = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "0.1.0", "kind": "service", "plane": "ingress"}
+            },
+        )
+        clean = Module(
+            name="spawner-ui",
+            path=Path("C:/tmp/spawner-ui"),
+            manifest={
+                "module": {"name": "spawner-ui", "version": "0.1.0", "kind": "app", "plane": "execution"}
+            },
+        )
+
+        class Args:
+            target = None
+            skip_install_commands = True
+            skip_dirty = False
+            stash_local_runtime = False
+            continue_update = False
+
+        with patch("spark_cli.cli.resolve_installed_target_modules", return_value=[clean, dirty]), \
+             patch("spark_cli.cli.print_install_summary"), \
+             patch("spark_cli.cli.dirty_update_modules", return_value=[(dirty, "M src/index.ts")]), \
+             patch("spark_cli.cli.update_module_source") as update_source, \
+             patch("spark_cli.cli.stop_tracked_process_key") as stop_process, \
+             patch("sys.stdout", new_callable=StringIO) as stdout:
+            self.assertEqual(cmd_update(Args()), 1)
+
+        self.assertIn("Update preflight found local runtime edits before touching services", stdout.getvalue())
+        self.assertIn("spark update --stash-local-runtime", stdout.getvalue())
+        update_source.assert_not_called()
+        stop_process.assert_not_called()
+
+    def test_cmd_update_stash_local_runtime_then_updates_cleanly(self) -> None:
+        dirty = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "0.1.0", "kind": "service", "plane": "ingress"}
+            },
+        )
+
+        class Args:
+            target = None
+            skip_install_commands = True
+            skip_dirty = False
+            stash_local_runtime = True
+            continue_update = False
+
+        with patch("spark_cli.cli.resolve_installed_target_modules", return_value=[dirty]), \
+             patch("spark_cli.cli.print_install_summary"), \
+             patch("spark_cli.cli.dirty_update_modules", return_value=[(dirty, "M src/index.ts")]), \
+             patch("spark_cli.cli.stash_module_local_changes", return_value=(True, "Saved working directory")), \
+             patch("spark_cli.cli.module_is_git_managed", return_value=True), \
+             patch("spark_cli.cli.update_module_source", return_value=(True, "already at pinned commit abc123")), \
+             patch("spark_cli.cli.tracked_process_keys_for_module", return_value=[]), \
+             patch("spark_cli.cli.run_module_hook") as hook, \
+             patch("spark_cli.cli.load_json", return_value={"spark-telegram-bot": {"installed_via": {"kind": "git", "target": "repo"}}}), \
+             patch("spark_cli.cli.install_module_record") as record, \
+             patch("spark_cli.cli.sync_generated_env_to_module"), \
+             patch("sys.stdout", new_callable=StringIO) as stdout:
+            self.assertEqual(cmd_update(Args()), 0)
+
+        self.assertIn("Stashing local runtime edits before update", stdout.getvalue())
+        self.assertIn("Update summary:", stdout.getvalue())
+        hook.assert_called_once_with(dirty, "post_install")
+        record.assert_called_once()
 
     def test_dirty_update_failure_detection_accepts_common_git_messages(self) -> None:
         self.assertTrue(is_dirty_update_failure("working tree has local changes; commit or stash them before updating"))

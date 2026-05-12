@@ -26,6 +26,7 @@ import urllib.request
 import zipfile
 from contextlib import contextmanager, redirect_stdout
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 from xml.sax.saxutils import escape as xml_escape
@@ -737,6 +738,52 @@ def is_dirty_update_failure(detail: str) -> bool:
         or "commit or stash" in lowered
         or "local changes would be overwritten" in lowered
     )
+
+
+def module_git_status(module: Module) -> tuple[bool, str]:
+    result = subprocess.run(
+        git_command("-C", str(module.path), "status", "--porcelain"),
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0, result.stdout.strip() if result.returncode == 0 else summarize_command_output(result)
+
+
+def dirty_update_modules(modules: list[Module]) -> list[tuple[Module, str]]:
+    dirty: list[tuple[Module, str]] = []
+    for module in modules:
+        if not module_is_git_managed(module.path):
+            continue
+        ok, detail = module_git_status(module)
+        if not ok:
+            dirty.append((module, detail))
+        elif detail:
+            dirty.append((module, detail))
+    return dirty
+
+
+def stash_module_local_changes(module: Module) -> tuple[bool, str]:
+    label = datetime.now(timezone.utc).strftime("spark-update-local-runtime-%Y%m%dT%H%M%SZ")
+    result = subprocess.run(
+        git_command("-C", str(module.path), "stash", "push", "-u", "-m", label),
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0, summarize_command_output(result) or label
+
+
+def print_dirty_update_preflight(dirty: list[tuple[Module, str]]) -> None:
+    print("Update preflight found local runtime edits before touching services:")
+    for module, detail in dirty:
+        summary = " ".join(str(detail or "").splitlines()).strip()
+        if len(summary) > 140:
+            summary = f"{summary[:137]}..."
+        print(f"  - {module.name}: {summary or 'working tree has local changes'}")
+    print("")
+    print("Choose one:")
+    print("  spark update --stash-local-runtime")
+    print("  spark update --skip-dirty")
+    print("  commit or stash the module edits manually, then run spark update --continue")
 
 
 def module_is_git_managed(module_path: Path) -> bool:
@@ -12813,23 +12860,49 @@ def cmd_update(args: argparse.Namespace) -> int:
         print("No installed Spark modules recorded.")
         return 0
     print_install_summary(modules)
+    if getattr(args, "continue_update", False):
+        print("Continuing update; modules already at their registry pins will be skipped naturally.")
+    dirty = dirty_update_modules(modules)
+    if dirty and getattr(args, "stash_local_runtime", False):
+        print("Stashing local runtime edits before update:")
+        stash_failures: list[tuple[Module, str]] = []
+        for module, _detail in dirty:
+            ok, stash_detail = stash_module_local_changes(module)
+            print(f"  - {module.name}: {'ok' if ok else 'failed'} - {stash_detail}")
+            if not ok:
+                stash_failures.append((module, stash_detail))
+        if stash_failures:
+            print("")
+            print("Update stopped before touching running processes because stashing failed.")
+            for module, detail in stash_failures:
+                print(f"  - {module.name}: {detail}")
+            return 1
+        dirty = []
+    if dirty and not getattr(args, "skip_dirty", False):
+        print_dirty_update_preflight(dirty)
+        return 1
+    skipped_dirty = {module.name: detail for module, detail in dirty} if getattr(args, "skip_dirty", False) else {}
+    if skipped_dirty:
+        print("Skipping dirty modules before touching services:")
+        for module_name in skipped_dirty:
+            module_path = next((module.path for module in modules if module.name == module_name), "")
+            print(f"  - {module_name}: inspect with `git -C \"{module_path}\" status --short`")
+        modules = [module for module in modules if module.name not in skipped_dirty]
+        if not modules:
+            print("No clean modules left to update.")
+            return 0
+    updated_modules: list[str] = []
+    stopped_processes: list[str] = []
     for module in modules:
         if module_is_git_managed(module.path):
             ok, detail = update_module_source(module)
             print(f"git update {module.name}: {'ok' if ok else 'failed'} - {detail}")
             if not ok:
-                if getattr(args, "skip_dirty", False) and is_dirty_update_failure(detail):
-                    print(f"Skipping {module.name}: local changes are present, so Spark left this module untouched.")
-                    print(
-                        "Repair later: inspect with "
-                        f"`git -C \"{module.path}\" status --short`, then commit/stash or reinstall."
-                    )
-                    continue
                 print(f"Update stopped before touching running processes for {module.name}.")
                 print(
                     "Repair: inspect local changes with "
                     f"`git -C \"{module.path}\" status --short`, then commit/stash them "
-                    "or reinstall once the module source is clean."
+                    "or reinstall once the module source is clean. Then run `spark update --continue`."
                 )
                 return 1
         with pid_file_lock():
@@ -12841,6 +12914,7 @@ def cmd_update(args: argparse.Namespace) -> int:
             pid = int(record.get("pid", 0)) if isinstance(record, dict) else 0
             if pid and pid_is_running(pid):
                 print(f"Stopping {process_key} before update so install commands can replace locked files.")
+                stopped_processes.append(process_key)
             stop_tracked_process_key(process_key)
         if not args.skip_install_commands:
             execute_install_commands(module)
@@ -12857,9 +12931,22 @@ def cmd_update(args: argparse.Namespace) -> int:
         )
         sync_generated_env_to_module(module)
         print(f"Updated {module.name} from {module.path}")
+        updated_modules.append(module.name)
     refreshed = refresh_telegram_builder_runtime_refs(load_json(REGISTRY_PATH, {}))
     if refreshed:
         print(f"Refreshed Builder runtime refs in {len(refreshed)} generated Telegram config file(s).")
+    print("")
+    print("Update summary:")
+    print(f"  Updated: {', '.join(updated_modules) if updated_modules else 'none'}")
+    if skipped_dirty:
+        print(f"  Skipped dirty: {', '.join(skipped_dirty)}")
+    else:
+        print("  Skipped dirty: none")
+    if stopped_processes:
+        print(f"  Stopped runtime process(es): {', '.join(stopped_processes)}")
+        print("  Next: run `spark live restart`, then `spark live status`.")
+    else:
+        print("  Runtime processes stopped: none")
     return 0
 
 
@@ -13653,6 +13740,8 @@ def build_parser() -> argparse.ArgumentParser:
     update_parser.add_argument("target", nargs="?")
     update_parser.add_argument("--skip-install-commands", action="store_true")
     update_parser.add_argument("--skip-dirty", action="store_true", help="Skip modules with local git changes and continue updating clean modules")
+    update_parser.add_argument("--stash-local-runtime", action="store_true", help="Stash dirty installed-runtime module edits before updating")
+    update_parser.add_argument("--continue", dest="continue_update", action="store_true", help="Resume after fixing a previous update preflight stop")
     update_parser.set_defaults(func=cmd_update)
 
     uninstall_parser = subparsers.add_parser("uninstall", help="Remove installed modules from Spark state and generated config")
