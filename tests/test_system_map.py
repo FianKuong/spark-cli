@@ -1032,6 +1032,52 @@ class SparkSystemMapTests(unittest.TestCase):
                             ),
                         ),
                         ("lane-2", "req-private-2", "", "episodic_trace", "captured", "private prompt should stay out"),
+                        (
+                            "lane-3",
+                            "req-private-action-1",
+                            "trace-private-action-1",
+                            "authority_gate",
+                            "blocked",
+                            json.dumps(
+                                {
+                                    "facts": {
+                                        "memory_action_verdict": {
+                                            "schema_version": "spark.memory_action_verdict.v1",
+                                            "verdict_id": "memory-action-verdict:test",
+                                            "owner_system": "spark-intelligence-builder",
+                                            "surface": "builder",
+                                            "action_family": "memory_forget",
+                                            "verdict": "blocked",
+                                            "reason_code": "missing_memory_authority_verdict",
+                                            "source_repo": "spark-intelligence-builder/domain-chip-memory",
+                                            "scope": "local_memory_action",
+                                            "trace_ref": "trace-private-action-1",
+                                            "request_id": "req-private-action-1",
+                                            "authority_verdict": {
+                                                "schema_version": "spark.authority_verdict.v1",
+                                                "action_family": "memory_forget",
+                                                "verdict": "blocked",
+                                                "confirmation_required": False,
+                                                "reason_code": "missing_memory_authority_verdict",
+                                                "scope": "local_memory_action",
+                                                "source_policy": (
+                                                    "builder_domain_chip_memory_memory_action_gate"
+                                                ),
+                                                "source_repo": "spark-intelligence-builder/domain-chip-memory",
+                                                "trace_ref": "trace-private-action-1",
+                                                "request_id": "req-private-action-1",
+                                            },
+                                            "human_next_action": (
+                                                "Keep memory_forget read-only until source verdict."
+                                            ),
+                                            "data_boundary": "No private values exported.",
+                                            "memory_body": "private memory body",
+                                            "provider_output": "private model output",
+                                        }
+                                    }
+                                }
+                            ),
+                        ),
                     ],
                 )
                 conn.execute(
@@ -1094,12 +1140,12 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertGreater(index["safe_status_export"]["raw_hint_key_count"], 0)
         trace_join = index["builder_memory_tables"]["memory_lane_trace_join"]
         self.assertEqual(trace_join["status"], "present")
-        self.assertEqual(trace_join["row_count"], 2)
-        self.assertEqual(trace_join["trace_ref_present_count"], 1)
+        self.assertEqual(trace_join["row_count"], 3)
+        self.assertEqual(trace_join["trace_ref_present_count"], 2)
         self.assertEqual(trace_join["missing_trace_ref_count"], 1)
         self.assertEqual(
             index["memory_review_queue"]["counts"]["memory_lane_trace_join"]["trace_ref_present_count"],
-            1,
+            2,
         )
         self.assertEqual(index["memory_review_queue"]["schema_version"], "spark.memory_review_queue.v1")
         self.assertEqual(index["memory_proof_cards"]["schema_version"], "spark.memory_proof_cards.compiled.v1")
@@ -1118,6 +1164,19 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertEqual(review_card["freshness"], "stale")
         self.assertEqual(review_card["source_ref_count"], 1)
         self.assertTrue(review_card["trace_ref_present"])
+        self.assertEqual(
+            index["memory_action_verdicts"]["schema_version"],
+            "spark.memory_action_verdicts.compiled.v1",
+        )
+        self.assertEqual(index["memory_action_verdicts"]["counts"]["item_count"], 1)
+        self.assertEqual(index["memory_action_verdicts"]["counts"]["blocked_count"], 1)
+        action_verdict = index["memory_action_verdicts"]["items"][0]
+        self.assertEqual(action_verdict["action_family"], "memory_forget")
+        self.assertEqual(action_verdict["verdict"], "blocked")
+        self.assertEqual(action_verdict["authority_schema_version"], "spark.authority_verdict.v1")
+        self.assertEqual(action_verdict["source_repo"], "spark-intelligence-builder/domain-chip-memory")
+        self.assertTrue(action_verdict["trace_ref_present"])
+        self.assertTrue(action_verdict["request_id_present"])
         self.assertGreater(index["memory_review_queue"]["counts"]["item_count"], 0)
         self.assertTrue(all(item.get("operator_paths") for item in index["memory_review_queue"]["items"]))
         self.assertTrue(
@@ -1142,6 +1201,8 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertNotIn("raw_text", encoded)
         self.assertNotIn("trace-private-1", encoded)
         self.assertNotIn("req-private-1", encoded)
+        self.assertNotIn("trace-private-action-1", encoded)
+        self.assertNotIn("req-private-action-1", encoded)
         self.assertNotIn("private memory body", encoded)
         self.assertNotIn("private-chat-123", encoded)
         self.assertNotIn("private-source-ref", encoded)
