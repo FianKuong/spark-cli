@@ -2962,7 +2962,15 @@ def inspect_builder_trace_health(builder_home: Path) -> dict[str, Any]:
             columns = [row[1] for row in conn.execute("pragma table_info(builder_events)")]
             group_columns = [
                 column
-                for column in ("component", "event_type", "status", "severity", "target_surface", "evidence_lane")
+                for column in (
+                    "component",
+                    "event_type",
+                    "reason_code",
+                    "status",
+                    "severity",
+                    "target_surface",
+                    "evidence_lane",
+                )
                 if column in columns
             ]
             total = int(conn.execute("select count(*) from builder_events").fetchone()[0])
@@ -3045,17 +3053,28 @@ def inspect_builder_trace_health(builder_home: Path) -> dict[str, Any]:
                         limit 30
                         """
                     ).fetchall()
+                    row_items = []
+                    for row in rows:
+                        values = {
+                            column: str(row[index] or "[missing]") for index, column in enumerate(group_columns)
+                        }
+                        row_items.append(
+                            {
+                                **values,
+                                "event_count": int(row[len(group_columns)] or 0),
+                                **builder_high_severity_source_state(
+                                    conn,
+                                    group_columns=group_columns,
+                                    values=values,
+                                    columns=columns,
+                                ),
+                            }
+                        )
                     out["high_severity_open_sources"] = {
                         "group_by": group_columns,
                         "limit": 30,
                         "redaction": "aggregate high-severity counts grouped by allowlisted event metadata only",
-                        "rows": [
-                            {
-                                **{column: str(row[index] or "[missing]") for index, column in enumerate(group_columns)},
-                                "event_count": int(row[len(group_columns)] or 0),
-                            }
-                            for row in rows
-                        ],
+                        "rows": row_items,
                     }
             if {"event_id", "parent_event_id"}.issubset(columns):
                 orphaned = conn.execute(
@@ -3250,6 +3269,104 @@ def builder_trace_group_where(group_columns: list[str], values: dict[str, str]) 
             clauses.append(f'coalesce(nullif(trim("{column}"), \'\'), \'[missing]\') = ?')
             params.append(value)
     return " and ".join(clauses) if clauses else "1 = 1", params
+
+
+def builder_high_severity_source_state(
+    conn: sqlite3.Connection,
+    *,
+    group_columns: list[str],
+    values: dict[str, str],
+    columns: list[str],
+) -> dict[str, Any]:
+    identity_columns = [
+        column
+        for column in group_columns
+        if column not in {"status", "severity"} and column in columns
+    ]
+    if not identity_columns:
+        identity_columns = [column for column in ("component", "event_type") if column in columns]
+    where_sql, params = builder_trace_group_where(identity_columns, values)
+    order_column = "created_at" if "created_at" in columns else "rowid"
+    latest = conn.execute(
+        f"""
+        select status, severity, trace_ref, request_id{', created_at' if 'created_at' in columns else ''}
+        from builder_events
+        where {where_sql}
+        order by "{order_column}" desc
+        limit 1
+        """,
+        params,
+    ).fetchone()
+    out: dict[str, Any] = {
+        "latest_lifecycle_state": "unknown",
+        "latest_event_status": None,
+        "latest_event_severity": None,
+        "latest_event_trace_ref_present": False,
+        "latest_event_request_id_present": False,
+    }
+    if latest is not None:
+        latest_status = str(latest[0] or "").strip().lower()
+        latest_severity = str(latest[1] or "").strip().lower()
+        latest_trace_ref = str(latest[2] or "").strip()
+        latest_request_id = str(latest[3] or "").strip()
+        out["latest_event_status"] = latest_status or None
+        out["latest_event_severity"] = latest_severity or None
+        out["latest_event_trace_ref_present"] = bool(latest_trace_ref)
+        out["latest_event_request_id_present"] = bool(latest_request_id)
+        if "created_at" in columns:
+            out["latest_event_created_at"] = str(latest[4] or "")
+        if latest_status in {"resolved", "closed", "succeeded", "ok", "recorded"} and latest_severity in {
+            "",
+            "info",
+            "low",
+            "medium",
+        }:
+            out["latest_lifecycle_state"] = "latest_resolved"
+        elif latest_status in {"open", "failed", "error", "blocked"} and latest_severity in {"high", "critical"}:
+            out["latest_lifecycle_state"] = "latest_open_high_severity"
+        else:
+            out["latest_lifecycle_state"] = "latest_unknown"
+
+    if "created_at" in columns:
+        now = datetime.now(timezone.utc)
+        for label, delta in (("1h", timedelta(hours=1)), ("24h", timedelta(hours=24))):
+            threshold = (now - delta).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            count_params = [threshold, *params]
+            total = conn.execute(
+                f"""
+                select count(*)
+                from builder_events
+                where created_at >= ?
+                  and {where_sql}
+                """,
+                count_params,
+            ).fetchone()[0]
+            high_open = conn.execute(
+                f"""
+                select count(*)
+                from builder_events
+                where created_at >= ?
+                  and {where_sql}
+                  and lower(coalesce(severity, '')) in ('high', 'critical')
+                  and lower(coalesce(status, '')) in ('open', 'failed', 'error', 'blocked')
+                """,
+                count_params,
+            ).fetchone()[0]
+            out[f"recent_{label}_row_count"] = int(total or 0)
+            out[f"recent_{label}_high_open_count"] = int(high_open or 0)
+
+    if (
+        out.get("latest_lifecycle_state") == "latest_open_high_severity"
+        and int(out.get("recent_24h_row_count") or 0) == 0
+    ):
+        out["lifecycle_temporal_state"] = "stale_open_high_severity"
+    elif out.get("latest_lifecycle_state") == "latest_resolved":
+        out["lifecycle_temporal_state"] = "latest_resolved"
+    elif out.get("latest_lifecycle_state") == "latest_open_high_severity":
+        out["lifecycle_temporal_state"] = "latest_open_high_severity"
+    else:
+        out["lifecycle_temporal_state"] = str(out.get("latest_lifecycle_state") or "unknown")
+    return out
 
 
 def build_modules(
@@ -4047,28 +4164,61 @@ def build_builder_trace_repair_cards(trace_index: dict[str, Any]) -> dict[str, A
         event_type = str(row.get("event_type") or "unknown")
         status = str(row.get("status") or "open")
         severity = str(row.get("severity") or "high")
+        lifecycle_state = str(row.get("lifecycle_temporal_state") or row.get("latest_lifecycle_state") or "unknown")
+        if lifecycle_state == "latest_resolved":
+            card_status = "latest_resolved"
+            priority = "medium"
+            evidence = "latest lifecycle row for this high-severity family is resolved or lower severity"
+            recommended_action = "Keep as historical lifecycle debt unless new high-severity rows appear."
+        elif lifecycle_state == "stale_open_high_severity":
+            card_status = "stale_open_high_severity"
+            priority = "medium"
+            evidence = "latest high-severity row predates the active window"
+            recommended_action = "Reproduce before patching; this may be stale lifecycle backlog."
+        else:
+            card_status = "open"
+            priority = "critical" if severity == "critical" else "high"
+            evidence = "high or critical Builder events remain open in aggregate black-box metadata"
+            recommended_action = (
+                "Confirm whether the guardrail is still active, then add source-owned close/resolution metadata."
+            )
         owner = trace_repair_owner(component)
         cards.append(
             {
                 "schema_version": "spark.builder_trace_repair_card.v0",
-                "id": trace_repair_id("builder", component, event_type, status, severity, "open-high-severity"),
+                "id": trace_repair_id(
+                    "builder",
+                    component,
+                    event_type,
+                    row.get("reason_code") or "unknown-reason",
+                    status,
+                    severity,
+                    "open-high-severity",
+                ),
                 "category": "open_high_severity_event",
                 "title": f"Resolve high-severity {component} / {event_type}",
-                "status": "open",
-                "priority": "critical" if severity == "critical" else "high",
+                "status": card_status,
+                "priority": priority,
                 "owner_repo": owner.get("owner_repo") or "spark-intelligence-builder",
                 "source_module": owner.get("source_module") or f"{component} event lifecycle",
                 "event_producer_family": component,
                 "event_type": event_type,
+                "reason_code": row.get("reason_code"),
                 "event_status": status,
                 "event_severity": severity,
+                "latest_lifecycle_state": row.get("latest_lifecycle_state") or "unknown",
+                "latest_event_status": row.get("latest_event_status"),
+                "latest_event_severity": row.get("latest_event_severity"),
+                "latest_event_trace_ref_present": bool(row.get("latest_event_trace_ref_present")),
+                "latest_event_request_id_present": bool(row.get("latest_event_request_id_present")),
+                "recent_1h_high_open_count": int(row.get("recent_1h_high_open_count") or 0),
+                "recent_24h_high_open_count": int(row.get("recent_24h_high_open_count") or 0),
+                "recent_24h_row_count": int(row.get("recent_24h_row_count") or 0),
                 "missing_field": "resolution_or_close_event",
                 "observed_event_count": int(row.get("event_count") or 0),
                 "current_window": current_health.get("window"),
-                "evidence": "high or critical Builder events remain open in aggregate black-box metadata",
-                "recommended_action": (
-                    "Confirm whether the guardrail is still active, then add source-owned close/resolution metadata."
-                ),
+                "evidence": evidence,
+                "recommended_action": recommended_action,
                 "verification_command": "spark os trace --json",
                 "data_boundary": "aggregate metadata only; no event bodies, raw prompts, provider output, memory bodies, transcripts, audio, chat ids, or secrets",
             }
@@ -5157,7 +5307,7 @@ def build_operating_cockpit(compiled: dict[str, Any]) -> dict[str, Any]:
         },
         "action_boundary": "Read-only until high-agency actions carry AuthorityVerdictV1 trace evidence.",
         "trace_repair_queue": as_list(trace_index.get("trace_repair_queue"))[:5],
-        "builder_trace_repair_cards": as_list(as_dict(trace_index.get("builder_trace_repair_cards")).get("items"))[:6],
+        "builder_trace_repair_cards": as_list(as_dict(trace_index.get("builder_trace_repair_cards")).get("items"))[:10],
         "review_candidates": as_list(as_dict(trace_index.get("review_candidates")).get("items"))[:5],
         "duplicate_truths": {
             "schema_version": duplicate_truths.get("schema_version"),

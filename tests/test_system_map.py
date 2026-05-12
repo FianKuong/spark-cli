@@ -656,6 +656,45 @@ class SparkSystemMapTests(unittest.TestCase):
         self.assertEqual(card["recent_24h_missing_trace_ref_count"], 1)
         self.assertIn("Watch for new missing-trace rows", card["recommended_action"])
 
+    def test_builder_trace_repair_cards_mark_resolved_high_severity_lifecycle(self) -> None:
+        trace_index = {
+            "builder_trace_health": {
+                "high_severity_open_count": 3,
+                "recent_windows": [
+                    {"window": "24h", "row_count": 4, "missing_trace_ref_count": 0, "missing_trace_ref_ratio": 0.0},
+                ],
+                "high_severity_open_sources": {
+                    "rows": [
+                        {
+                            "component": "stop_ship_checks",
+                            "event_type": "contradiction_recorded",
+                            "reason_code": "stop_ship_external_execution_governance",
+                            "status": "open",
+                            "severity": "high",
+                            "event_count": 3,
+                            "latest_lifecycle_state": "latest_resolved",
+                            "latest_event_status": "resolved",
+                            "latest_event_severity": "low",
+                            "latest_event_trace_ref_present": True,
+                            "latest_event_request_id_present": True,
+                            "recent_24h_high_open_count": 1,
+                            "recent_24h_row_count": 2,
+                        }
+                    ]
+                },
+            },
+            "trace_repair_queue": [],
+        }
+        trace_index["trace_current_health"] = build_trace_current_health(trace_index)
+        cards = build_builder_trace_repair_cards(trace_index)
+
+        card = cards["items"][0]
+        self.assertEqual(card["status"], "latest_resolved")
+        self.assertEqual(card["priority"], "medium")
+        self.assertEqual(card["reason_code"], "stop_ship_external_execution_governance")
+        self.assertEqual(card["latest_event_status"], "resolved")
+        self.assertIn("historical lifecycle debt", card["recommended_action"])
+
     def test_cross_system_trace_samples_keep_join_metadata_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
