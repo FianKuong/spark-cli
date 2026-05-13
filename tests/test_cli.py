@@ -3462,6 +3462,58 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(setup_state["memory_sidecars"]["graphiti"]["db_path"], "C:/spark/graphiti-kuzu")
         self.assertTrue(setup_state["memory_sidecars"]["graphiti"]["enabled"])
 
+    def test_collect_setup_configuration_runs_llm_wizard_before_telegram_prompts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp = Path(tmp_dir)
+            args = build_parser().parse_args(["setup"])
+            gateway = make_module(
+                "spark-telegram-bot",
+                ["telegram.ingress"],
+                ["telegram.bot_token", "telegram.admin_ids"],
+            )
+            events: list[tuple[object, ...]] = []
+
+            def fake_collect_secret_values(
+                _args: argparse.Namespace,
+                _bundle: list[Module],
+                *,
+                interactive: bool | None = None,
+                allow_missing: bool = False,
+                existing_values: dict[str, str] | None = None,
+            ) -> dict[str, str]:
+                events.append(("collect", interactive, allow_missing, sorted((existing_values or {}).keys())))
+                if allow_missing:
+                    return {}
+                values = dict(existing_values or {})
+                values["telegram.bot_token"] = "123456:test-token"
+                values["telegram.admin_ids"] = "111"
+                return values
+
+            def fake_llm_wizard(_args: argparse.Namespace, values: dict[str, str]) -> dict[str, str]:
+                events.append(("llm", sorted(values.keys())))
+                updated = dict(values)
+                updated["llm.zai.api_key"] = "zai-test-key"
+                return updated
+
+            with patch("spark_cli.cli.CONFIG_PATH", tmp / "setup.json"), \
+                 patch("spark_cli.cli.collect_secret_values", side_effect=fake_collect_secret_values), \
+                 patch("spark_cli.cli.run_llm_provider_wizard", side_effect=fake_llm_wizard), \
+                 patch("spark_cli.cli.ensure_generated_setup_secrets", side_effect=lambda values, _bundle: values), \
+                 patch("spark_cli.cli.build_llm_env", return_value=("zai", {"ZAI_API_KEY": "zai-test-key", "ZAI_MODEL": "glm-5.1"})), \
+                 patch("spark_cli.cli.spark_builder_home", return_value=tmp / "state" / "spark-intelligence"):
+                _, setup_state = collect_setup_configuration(
+                    args,
+                    [gateway],
+                    gateway,
+                    interactive=True,
+                )
+
+        self.assertEqual(events[0], ("collect", False, True, []))
+        self.assertEqual(events[1], ("llm", []))
+        self.assertEqual(events[2], ("collect", True, False, ["llm.zai.api_key"]))
+        self.assertIn("llm.zai.api_key", setup_state["secret_keys"])
+        self.assertIn("telegram.bot_token", setup_state["secret_keys"])
+
     def test_install_memory_sidecar_dependencies_installs_graphiti_kuzu_extra_when_enabled(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             memory_root = Path(tmp_dir) / "domain-chip-memory"
@@ -4619,6 +4671,86 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("spark fix spawner", output)
         self.assertNotIn("spark setup --chat-llm-provider", output)
         self.assertNotIn("Run another Telegram bot", output)
+
+    def test_first_run_transcripts_keep_simple_onboarding_path(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        scripts = {
+            "install.sh": (root / "scripts" / "install.sh").read_text(encoding="utf-8"),
+            "install.ps1": (root / "scripts" / "install.ps1").read_text(encoding="utf-8"),
+        }
+        for name, text in scripts.items():
+            with self.subTest(name=name):
+                self.assertLess(text.index("Help you choose how Spark thinks"), text.index("Connect your Telegram bot"))
+                self.assertLess(text.index("Connect your Telegram bot"), text.index("Start Spark so you can chat and build"))
+                self.assertIn("Start chatting and building:", text)
+
+        guide_args = build_parser().parse_args(["guide"])
+        with patch("sys.stdout", new_callable=StringIO) as stdout:
+            self.assertEqual(guide_args.func(guide_args), 0)
+        guide_output = stdout.getvalue()
+        self.assertLess(guide_output.index("Choose how Spark thinks"), guide_output.index("Connect Telegram"))
+        self.assertLess(guide_output.index("Connect Telegram"), guide_output.index("Start chatting and building"))
+
+        verify_payload = {
+            "ok": True,
+            "summary": "Spark launch verification",
+            "bundle": "telegram-starter",
+            "checks": [{"name": "starter_bundle", "ok": True, "detail": "ready"}],
+            "next_commands": ["spark status", "spark verify --onboarding"],
+            "status_repair_hints": [],
+        }
+        verify_args = build_parser().parse_args(["verify", "--onboarding"])
+        with patch("spark_cli.cli.collect_verify_payload", return_value=verify_payload), \
+             patch("sys.stdout", new_callable=StringIO) as stdout:
+            self.assertEqual(verify_args.func(verify_args), 0)
+        verify_output = stdout.getvalue()
+        self.assertIn("Start in Telegram:", verify_output)
+        self.assertIn("If Telegram asks for a start code, send /start.", verify_output)
+
+    def test_first_run_copy_lint_blocks_confusing_legacy_phrases(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        texts = {
+            "scripts/install.sh": (root / "scripts" / "install.sh").read_text(encoding="utf-8"),
+            "scripts/install.ps1": (root / "scripts" / "install.ps1").read_text(encoding="utf-8"),
+        }
+        guide_args = build_parser().parse_args(["guide"])
+        with patch("sys.stdout", new_callable=StringIO) as stdout:
+            self.assertEqual(guide_args.func(guide_args), 0)
+        texts["spark guide"] = stdout.getvalue()
+
+        verify_payload = {
+            "ok": True,
+            "summary": "Spark launch verification",
+            "bundle": "telegram-starter",
+            "checks": [{"name": "starter_bundle", "ok": True, "detail": "ready"}],
+            "next_commands": ["spark status"],
+            "status_repair_hints": [],
+        }
+        verify_args = build_parser().parse_args(["verify", "--onboarding"])
+        with patch("spark_cli.cli.collect_verify_payload", return_value=verify_payload), \
+             patch("sys.stdout", new_callable=StringIO) as stdout:
+            self.assertEqual(verify_args.func(verify_args), 0)
+        texts["spark verify --onboarding"] = stdout.getvalue()
+
+        banned = [
+            "TELEGRAM_RELAY_SECRET",
+            "telegram relay secret",
+            "relay secret",
+            "Finish in Telegram",
+            "Finish onboarding in Telegram",
+            "Spawner execution plane",
+            "Review the installer plan with me",
+            "Telegram + LLM setup",
+            "First, create a Telegram bot",
+            "first, enter the required Telegram setup values",
+            "Open Telegram and send:",
+            "Open Telegram and send /start",
+        ]
+        for name, text in texts.items():
+            folded = text.lower()
+            for phrase in banned:
+                with self.subTest(name=name, phrase=phrase):
+                    self.assertNotIn(phrase.lower(), folded)
 
     def test_guide_advanced_prints_expert_surface(self) -> None:
         args = build_parser().parse_args(["guide", "--advanced"])
@@ -7526,6 +7658,33 @@ class SparkCliTests(unittest.TestCase):
             collect_secret_values(Args(), [module], interactive=False)
         self.assertIn("Missing required secrets", str(error.exception))
 
+    def test_collect_secret_values_allow_missing_prefills_without_failing(self) -> None:
+        module = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "1.0.0", "kind": "service", "plane": "ingress"},
+                "needs": {"secrets": ["telegram.bot_token"]},
+                "secrets": {
+                    "telegram_bot_token": {"prompt": "Bot token", "required": True, "env_var": "BOT_TOKEN"},
+                },
+            },
+        )
+
+        class Args:
+            secret = None
+            bot_token = None
+            admin_telegram_ids = None
+            telegram_relay_secret = None
+            non_interactive = True
+
+        with patch("spark_cli.cli.fetch_secret", return_value=None), \
+             patch("spark_cli.cli.getpass.getpass") as getpass_mock:
+            values = collect_secret_values(Args(), [module], interactive=False, allow_missing=True)
+
+        self.assertEqual(values, {})
+        getpass_mock.assert_not_called()
+
     def test_is_git_source_recognizes_common_url_shapes(self) -> None:
         self.assertTrue(is_git_source("https://github.com/spark/memory"))
         self.assertTrue(is_git_source("git@github.com:spark/memory.git"))
@@ -8986,7 +9145,7 @@ class SparkCliTests(unittest.TestCase):
         collect_mock.assert_called_once_with(deep=True)
         output = stdout.getvalue()
         self.assertIn("Spark onboarding verification", output)
-        self.assertIn("Finish onboarding in Telegram", output)
+        self.assertIn("Start in Telegram", output)
         self.assertIn("If Telegram asks for a start code, send /start", output)
         self.assertIn("choose Level 4 so Mission Control can inspect and build in local workspaces", output)
         self.assertIn("/run say exactly OK", output)

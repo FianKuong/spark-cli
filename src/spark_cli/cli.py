@@ -1927,8 +1927,11 @@ def collect_secret_values(
     modules: list[Module],
     *,
     interactive: bool | None = None,
+    allow_missing: bool = False,
+    existing_values: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    secret_values = parse_secret_pairs(getattr(args, "secret", None))
+    secret_values = dict(existing_values or {})
+    secret_values.update(parse_secret_pairs(getattr(args, "secret", None)))
     legacy_map = {
         "telegram.bot_token": getattr(args, "bot_token", None),
         "telegram.admin_ids": getattr(args, "admin_telegram_ids", None),
@@ -1974,7 +1977,7 @@ def collect_secret_values(
         for secret_id, requirement in requirements.items()
         if requirement.get("required") and not secret_values.get(secret_id)
     ]
-    if missing:
+    if missing and not allow_missing:
         descriptions = []
         for secret_id in missing:
             requirement = requirements[secret_id]
@@ -5105,10 +5108,13 @@ def collect_setup_configuration(
     from .sandbox.access import safe_workspace_setup_state
 
     existing_setup = load_json(CONFIG_PATH, {})
-    secret_values = collect_secret_values(args, bundle, interactive=interactive)
-    secret_values = ensure_generated_setup_secrets(secret_values, bundle)
     if interactive:
+        secret_values = collect_secret_values(args, bundle, interactive=False, allow_missing=True)
         secret_values = run_llm_provider_wizard(args, secret_values)
+        secret_values = collect_secret_values(args, bundle, interactive=True, existing_values=secret_values)
+    else:
+        secret_values = collect_secret_values(args, bundle, interactive=False)
+    secret_values = ensure_generated_setup_secrets(secret_values, bundle)
     llm_provider, llm_env = build_llm_env(args, secret_values)
     preserved_secret_keys = set(existing_setup.get("secret_keys", [])) if isinstance(existing_setup, dict) else set()
     preserved_profiles = existing_setup.get("telegram_profiles") if isinstance(existing_setup, dict) else None
@@ -11008,7 +11014,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         print(f"  {command}")
     if onboarding:
         print("")
-        print("Finish onboarding in Telegram:")
+        print("Start in Telegram:")
         for index, item in enumerate(onboarding_checklist(), start=1):
             print(f"  {index}. {item}")
     return 0 if payload["ok"] else 1
