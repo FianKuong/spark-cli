@@ -4595,8 +4595,8 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("@userinfobot", output)
         self.assertIn("Windows PowerShell/CMD", output)
         self.assertIn("WSL Ubuntu shell", output)
-        self.assertIn("Get your Telegram bot ready", output)
-        self.assertIn("Run setup", output)
+        self.assertIn("Choose how Spark thinks", output)
+        self.assertIn("Connect Telegram", output)
         self.assertIn("Run: spark setup", output)
         self.assertIn("Safe access", output)
         self.assertIn("safe workspace", output)
@@ -4609,7 +4609,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("spark providers test --role chat", output)
         self.assertIn("spark autostart on --now", output)
         self.assertIn("spark fix autostart", output)
-        self.assertIn("Finish in Telegram", output)
+        self.assertIn("Start chatting and building", output)
         self.assertIn("choose Level 4", output)
         self.assertIn("Use a lower level only", output)
         self.assertIn("/diagnose", output)
@@ -4853,8 +4853,8 @@ class SparkCliTests(unittest.TestCase):
                  patch("sys.stdout", new_callable=StringIO) as stdout:
                 self.assertEqual(cmd_setup(args), 0)
             setup_output = stdout.getvalue()
-            self.assertIn("Spark is live.", setup_output)
-            self.assertIn("Open Telegram and send:", setup_output)
+            self.assertIn("Spark is ready.", setup_output)
+            self.assertIn("Start chatting and building:", setup_output)
             self.assertIn("/start ember-9999", setup_output)
             self.assertIn("[OK] Spark heard you.", setup_output)
             self.assertIn("[OK] Spark replied.", setup_output)
@@ -4998,7 +4998,7 @@ class SparkCliTests(unittest.TestCase):
                 self.assertEqual(cmd_onboard(args), 0)
         start_mock.assert_called_once()
         output = stdout.getvalue()
-        self.assertIn("Open Telegram and send:", output)
+        self.assertIn("Start chatting and building:", output)
         self.assertIn("/start ember-9999", output)
 
     def test_split_telegram_admin_ids_trims_and_deduplicates(self) -> None:
@@ -8987,7 +8987,7 @@ class SparkCliTests(unittest.TestCase):
         output = stdout.getvalue()
         self.assertIn("Spark onboarding verification", output)
         self.assertIn("Finish onboarding in Telegram", output)
-        self.assertIn("Open Telegram and send /start", output)
+        self.assertIn("If Telegram asks for a start code, send /start", output)
         self.assertIn("choose Level 4 so Mission Control can inspect and build in local workspaces", output)
         self.assertIn("/run say exactly OK", output)
 

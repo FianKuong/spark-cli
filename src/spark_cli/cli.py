@@ -2538,7 +2538,7 @@ def prompt_for_secret(secret_id: str, requirement: dict[str, Any]) -> str:
     suffix = "" if required else " (press enter to skip)"
     if secret_id == "telegram.bot_token":
         print("")
-        print("First, create a Telegram bot.")
+        print("Connect Telegram so Spark has a place to talk with you.")
         print("  1. Open Telegram")
         print("  2. Message @BotFather")
         print("  3. Send /newbot")
@@ -2602,7 +2602,8 @@ def run_setup_wizard(
     if not to_prompt:
         return collected
     print("")
-    print("Spark setup wizard -- first, enter the required Telegram setup values.")
+    print("Spark setup wizard")
+    print("  Spark collects Telegram values locally, then helps you choose how it thinks.")
     print("  Secrets are masked with stars on Windows and hidden on other terminals.")
     print("  Telegram admin IDs are shown so comma-separated IDs are easy to verify.")
     for secret_id in to_prompt:
@@ -4978,7 +4979,7 @@ def print_setup_next_steps(
     telegram_label = "@YourSparkBot"
     print("")
     if start_now and start_ok:
-        print("Spark is live.")
+        print("Spark is ready.")
     elif start_now:
         print("Spark is installed, but not running yet.")
     else:
@@ -5004,11 +5005,13 @@ def print_setup_next_steps(
         print("Recommended for builders: choose Level 4 when prompted so Mission Control can inspect and build in local workspaces.")
         print("Choose a lower level only for chat-only or public-research installs.")
     print("")
-    print("Open Telegram and send:")
-    print(f"  /start {session}")
+    print("Start chatting and building:")
+    print("  1. Open your Spark bot in Telegram.")
+    print(f"  2. If Telegram asks for a start code, send: /start {session}")
+    print("  3. Send a normal message, or try: /run say exactly OK")
     print("")
-    print("Spark learns from explicit memories, diagnostics, and approved missions.")
-    print("You stay in control of what it can do.")
+    print("When you are ready, ask Spark how it can improve for your workflows.")
+    print("Your agent will guide memory, missions, and self-improvement one step at a time.")
     print("")
     if provider == "not_configured":
         print("LLM provider: not configured yet")
@@ -5496,8 +5499,10 @@ def cmd_onboard(args: argparse.Namespace) -> int:
         setup_state["onboarding_session"] = session
         save_json(CONFIG_PATH, setup_state)
     print("")
-    print("Open Telegram and send:")
-    print(f"  /start {session}")
+    print("Start chatting and building:")
+    print("  1. Open your Spark bot in Telegram.")
+    print(f"  2. If Telegram asks for a start code, send: /start {session}")
+    print("  3. Send a normal message, or try: /run say exactly OK")
     print("")
     print("Checks:")
     print("  spark verify --onboarding")
@@ -10813,12 +10818,13 @@ def collect_hosted_security_payload(*, deep: bool = False) -> dict[str, Any]:
 
 def onboarding_checklist() -> list[str]:
     return [
-        "Open Telegram and send /start to your Spark bot.",
+        "Open your Spark bot in Telegram.",
+        "If Telegram asks for a start code, send /start.",
         "Choose what Spark can do when asked. For first builds, choose Level 4 so Mission Control can inspect and build in local workspaces.",
         "Run spark providers test --role chat and confirm the selected LLM replies with PING_OK.",
         "Send /diagnose in Telegram and confirm Telegram, LLM, memory, and Spawner look OK.",
-        "Send /remember I like concise warm replies, then /recall concise warm replies.",
-        "Try a tiny build with /run say exactly OK, then check /board.",
+        "Send a normal message, then try a tiny build with /run say exactly OK.",
+        "When you are ready, ask Spark how it can improve for your workflows.",
         "If anything is quiet or confusing, run spark fix telegram.",
     ]
 
@@ -13184,7 +13190,7 @@ def cmd_uninstall(args: argparse.Namespace) -> int:
 def onboarding_guide_payload() -> dict[str, Any]:
     return {
         "title": "Spark starter guide",
-        "goal": "Install once, choose the LLM provider Spark will use, turn Spark Live on, then talk to Spark from Telegram.",
+        "goal": "Install Spark, choose how it thinks, connect Telegram, then start chatting and building with your agent.",
         "operating_systems": ["Windows PowerShell/CMD", "macOS Terminal", "Linux shell", "WSL Ubuntu shell"],
         "starter_bundle": [
             {
@@ -13254,17 +13260,17 @@ def onboarding_guide_payload() -> dict[str, Any]:
             "commands": ["spark access guide", "spark access setup", "spark sandbox docker doctor", "spark sandbox docker smoke"],
         },
         "quick_start": [
-            {"title": "Get your Telegram bot ready", "steps": [
+            {"title": "Choose how Spark thinks", "steps": [
+                "Run: spark setup",
+                "Choose one provider for Agent and Mission unless you already know you want a split.",
+                "OpenAI Codex, Claude Code, Ollama, and LM Studio can use local sign-in or local services; API providers ask for a key.",
+                "If paste is awkward, copy the value first and type @clipboard when Spark asks.",
+            ]},
+            {"title": "Connect Telegram", "steps": [
                 "Open Telegram and message @BotFather.",
                 "Send /newbot and copy the token BotFather gives you.",
                 "Message @userinfobot and copy your numeric Telegram id.",
-            ]},
-            {"title": "Run setup", "steps": [
-                "Run: spark setup",
-                "Paste your BotFather token and Telegram id when asked.",
-                "Choose one provider for Agent and Mission, or split them if you already know you want different models.",
-                "Press Enter for the recommended path, or choose your preferred provider.",
-                "If paste is awkward, copy the value first and type @clipboard when Spark asks.",
+                "Paste Telegram values only into local Spark setup, never into a website.",
             ]},
             {"title": "Turn Spark on", "steps": [
                 "Run: spark live start",
@@ -13273,18 +13279,19 @@ def onboarding_guide_payload() -> dict[str, Any]:
                 "To start Spark automatically when this computer logs in, run: spark autostart on --now.",
                 "If login startup seems stale or missing, run: spark fix autostart.",
             ]},
-            {"title": "Finish in Telegram", "steps": [
-                "Send /start to your Spark bot.",
+            {"title": "Start chatting and building", "steps": [
+                "Open your Spark bot in Telegram.",
+                "If Telegram asks for a start code, send /start.",
                 "Choose what Spark can do when asked. For first builds, choose Level 4 so Mission Control can inspect and build in local workspaces.",
                 "Use a lower level only when you want chat, memory, diagnostics, public research, or remote missions without local files.",
                 "Send /diagnose and make sure Telegram, LLM, memory, and Spawner look OK.",
-                "Send /remember I like concise warm replies, then /recall concise warm replies.",
-                "Try a tiny build with /run say exactly OK, then check /board.",
+                "Send a normal message, then try a tiny build with /run say exactly OK.",
+                "When you are ready, ask Spark how it can improve for your workflows; your agent will guide the next step.",
             ]},
         ],
         "start": [
             "spark autostart on --now",
-            "Open Telegram and send /start to your Spark bot.",
+            "Open your Spark bot in Telegram; if it asks for a start code, send /start.",
             "Choose what Spark can do when asked. For Mission Control builds on this computer, send /access 4.",
             "Use a lower access level only when you want Spark kept away from local folders.",
             "Send /diagnose in Telegram.",
@@ -13639,7 +13646,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup_parser.add_argument("--codex-model", default="gpt-5.5")
     setup_parser.set_defaults(func=cmd_setup)
 
-    onboard_parser = subparsers.add_parser("onboard", help="Resume setup, start Spark, and finish Telegram first-message onboarding")
+    onboard_parser = subparsers.add_parser("onboard", help="Resume setup, start Spark, and open the first Telegram chat")
     onboard_parser.add_argument("bundle", nargs="?", help="Bundle to onboard (default: pending setup bundle, configured bundle, or telegram-starter)")
     onboard_parser.add_argument("--non-interactive", action="store_true", help="Do not prompt while resuming setup")
     onboard_autostart_group = onboard_parser.add_mutually_exclusive_group()
