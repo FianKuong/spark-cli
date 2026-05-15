@@ -70,6 +70,16 @@ function Format-AutostartPlan {
     return "no"
 }
 
+function Format-InstallerRunMode {
+    if ($Yes) {
+        return "unattended (-Yes)"
+    }
+    if ([Console]::IsInputRedirected) {
+        return "unattended (non-interactive stdin)"
+    }
+    return "interactive"
+}
+
 function Resolve-FullPath {
     param([string]$Path)
     $expanded = [Environment]::ExpandEnvironmentVariables($Path)
@@ -282,6 +292,7 @@ function Show-DryRunPlan {
     Write-Host "  CLI commit:          $Ref"
     Write-Host "  Bundle:              $Bundle"
     Write-Host "  Voice included:      $voiceIncluded"
+    Write-Host "  Run mode:            $(Format-InstallerRunMode)"
     Write-Host "  Setup enabled:       $setupEnabled"
     $providerPlan = if ($LlmProvider) { "$LlmProvider for Agent and Mission" } else { "choose during spark setup" }
     Write-Host "  Default provider:    $providerPlan"

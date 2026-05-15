@@ -4119,6 +4119,8 @@ def validate_capability_needs_for_install(
     candidates: list[Module],
     installed_modules: dict[str, Module],
     discoverable_modules: dict[str, Module],
+    *,
+    bundle_name: str | None = None,
 ) -> list[str]:
     """Check that every `needs.capabilities` entry is satisfiable.
 
@@ -4145,13 +4147,25 @@ def validate_capability_needs_for_install(
                 for name, module in discoverable_modules.items()
                 if name != candidate.name and capability in module.capabilities
             ]
+            subject = (
+                f"bundle `{bundle_name}` requires module `{candidate.name}`, which needs required capability `{capability}`"
+                if bundle_name
+                else f"{candidate.name} needs required capability `{capability}`"
+            )
+            repair = (
+                f"spark setup {bundle_name}"
+                if bundle_name
+                else f"spark install {sorted(suggestions)[0]}"
+                if suggestions
+                else f"install a module that provides `{capability}`"
+            )
             if suggestions:
                 errors.append(
-                    f"{candidate.name} needs capability `{capability}`; install one of: {', '.join(sorted(suggestions))}"
+                    f"{subject}; provider module(s): {', '.join(sorted(suggestions))}; repair: {repair}"
                 )
             else:
                 errors.append(
-                    f"{candidate.name} needs capability `{capability}` but no discoverable module provides it"
+                    f"{subject}; no discoverable module provides it; repair: {repair}"
                 )
     return errors
 
@@ -5037,7 +5051,7 @@ def cmd_install(args: argparse.Namespace) -> int:
         conflicts = detect_capability_conflicts(bundle_modules, installed_modules)
         if conflicts:
             raise SystemExit("Cannot install bundle because of capability conflicts: " + "; ".join(conflicts))
-        unmet = validate_capability_needs_for_install(bundle_modules, installed_modules, modules)
+        unmet = validate_capability_needs_for_install(bundle_modules, installed_modules, modules, bundle_name=args.target)
         if unmet:
             raise SystemExit("Cannot install bundle because of unmet capability needs:\n  - " + "\n  - ".join(unmet))
         if not getattr(args, "skip_runtime_check", False):
@@ -5211,7 +5225,7 @@ def resolve_setup_bundle_plan(args: argparse.Namespace) -> SetupBundlePlan:
     conflicts = detect_capability_conflicts(bundle, installed_modules)
     if conflicts:
         raise SystemExit("Cannot run setup because of capability conflicts: " + "; ".join(conflicts))
-    unmet = validate_capability_needs_for_install(bundle, installed_modules, modules)
+    unmet = validate_capability_needs_for_install(bundle, installed_modules, modules, bundle_name=args.bundle)
     if unmet:
         raise SystemExit("Cannot run setup because of unmet capability needs:\n  - " + "\n  - ".join(unmet))
     if not getattr(args, "skip_runtime_check", False):

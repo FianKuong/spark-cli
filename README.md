@@ -128,13 +128,15 @@ If a good Node/npm is already installed, the installer uses it to avoid a slow f
 Before deploying installer changes, verify the committed script manifest locally with `spark verify --installers`. After deploying `agent.sparkswarm.ai`, run `spark verify --installers --hosted-installers` to catch stale hosted copies, stale hosted checksums, stale `/install/commands.json`, and stale `/install/release-manifest.json`.
 For production pushes, use the full gate in [docs/LAUNCH_RUNBOOK.md](./docs/LAUNCH_RUNBOOK.md) so installer, sandbox, hosted, and paired-repo checks ship together.
 
-After setup, the macOS/Linux/WSL installer runs `spark autostart on --now` by default. That starts the Telegram starter stack immediately and installs the operating-system login hook so Spark comes back after the computer logs in. Use `--no-autostart` or `SPARK_AUTOSTART=0` if you only want to install/configure and start Spark manually later. Run `spark fix autostart` if login startup is missing, stale, or points at an old Spark home.
+In an interactive terminal, the macOS/Linux/WSL installer starts the Telegram starter stack and installs the operating-system login hook by default. In unattended runs (`--yes`, piped stdin, CI, or another non-TTY shell), the installer defaults to `--no-autostart` so upgrades do not silently mutate login items. Use `--autostart` only when that mutation is intentional, or run `spark autostart on --now` later. Run `spark fix autostart` if login startup is missing, stale, or points at an old Spark home.
 
 For scripted setup:
 
 ```bash
 bash ./install.sh \
+  --yes \
   --non-interactive-setup \
+  --no-autostart \
   --bot-token "$TELEGRAM_BOT_TOKEN" \
   --admin-telegram-ids "$TELEGRAM_ADMIN_IDS"
 ```
@@ -147,7 +149,9 @@ Spark supports the same onboarding shape on Windows, macOS, Linux, and WSL:
 
 ```bash
 bash ./install.sh \
+  --yes \
   --non-interactive-setup \
+  --no-autostart \
   --bot-token "$TELEGRAM_BOT_TOKEN" \
   --admin-telegram-ids "$TELEGRAM_ADMIN_IDS" \
   --llm-provider openai

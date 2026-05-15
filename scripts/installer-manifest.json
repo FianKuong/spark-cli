@@ -8,11 +8,11 @@
   "installers": {
     "install.sh": {
       "path": "scripts/install.sh",
-      "sha256": "a0cc6400d34b42154773d9265b6c1ba0b8aabd467e13695359b9f667c5996117"
+      "sha256": "cce0926e8c06d117ba987132565701087e124eafe6885156f1b3a6664184e561"
     },
     "install.ps1": {
       "path": "scripts/install.ps1",
-      "sha256": "1937836ef5e88ff105c8a6aea469ec4a6b1e9c9d3811a333d7ca3b41033155c9"
+      "sha256": "55164660700445bef54b29b5a07da1db0b41090a1afc3ccb556fef09036f70dd"
     }
   }
 }

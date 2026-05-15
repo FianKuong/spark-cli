@@ -3318,7 +3318,10 @@ class SparkCliTests(unittest.TestCase):
         errors = validate_capability_needs_for_install([gateway], {}, {builder.name: builder})
         self.assertEqual(
             errors,
-            ["spark-telegram-bot needs capability `spark.runtime`; install one of: spark-intelligence-builder"],
+            [
+                "spark-telegram-bot needs required capability `spark.runtime`; "
+                "provider module(s): spark-intelligence-builder; repair: spark install spark-intelligence-builder"
+            ],
         )
 
     def test_validate_capability_needs_reports_completely_missing(self) -> None:
@@ -3333,7 +3336,10 @@ class SparkCliTests(unittest.TestCase):
         errors = validate_capability_needs_for_install([consumer], {}, {})
         self.assertEqual(
             errors,
-            ["consumer needs capability `nobody.has.this` but no discoverable module provides it"],
+            [
+                "consumer needs required capability `nobody.has.this`; "
+                "no discoverable module provides it; repair: install a module that provides `nobody.has.this`"
+            ],
         )
 
     def test_validate_capability_needs_accepts_already_installed_provider(self) -> None:
@@ -3348,6 +3354,31 @@ class SparkCliTests(unittest.TestCase):
         builder = make_module("spark-intelligence-builder", ["spark.runtime"])
         errors = validate_capability_needs_for_install([gateway], {builder.name: builder}, {})
         self.assertEqual(errors, [])
+
+    def test_validate_capability_needs_names_selected_bundle_and_repair(self) -> None:
+        gateway = Module(
+            name="spark-telegram-bot",
+            path=Path("C:/tmp/spark-telegram-bot"),
+            manifest={
+                "module": {"name": "spark-telegram-bot", "version": "1.0.0", "kind": "service", "plane": "ingress"},
+                "needs": {"capabilities": ["spark.runtime"]},
+            },
+        )
+        builder = make_module("spark-intelligence-builder", ["spark.runtime"])
+        errors = validate_capability_needs_for_install(
+            [gateway],
+            {},
+            {builder.name: builder},
+            bundle_name="telegram-starter",
+        )
+        self.assertEqual(
+            errors,
+            [
+                "bundle `telegram-starter` requires module `spark-telegram-bot`, "
+                "which needs required capability `spark.runtime`; "
+                "provider module(s): spark-intelligence-builder; repair: spark setup telegram-starter"
+            ],
+        )
 
     def test_detect_ingress_owner_returns_single_owner(self) -> None:
         gateway = make_module("spark-telegram-bot", ["telegram.ingress"])
@@ -3504,6 +3535,16 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("spark-voice-comms", [module.name for module in plan.bundle])
         self.assertIn("voice.speak", plan.modules["spark-voice-comms"].capabilities)
         self.assertIn("voice.transcribe", plan.modules["spark-voice-comms"].capabilities)
+
+    def test_release_starter_bundle_capability_contracts_are_dependency_scoped(self) -> None:
+        modules = make_starter_modules(include_voice=True)
+        self.assertNotIn("spark-voice-comms", resolve_bundle_names("telegram-starter"))
+        self.assertIn("spark-voice-comms", resolve_bundle_names("telegram-voice-starter"))
+
+        for bundle_name in ("telegram-starter", "telegram-voice-starter"):
+            bundle = [modules[name] for name in resolve_bundle_names(bundle_name)]
+            errors = validate_capability_needs_for_install(bundle, {}, modules, bundle_name=bundle_name)
+            self.assertEqual(errors, [], bundle_name)
 
     def test_setup_defaults_to_telegram_starter_bundle(self) -> None:
         args = build_parser().parse_args(["setup", "--non-interactive"])
@@ -11052,7 +11093,9 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("SPARK_AUTOSTART_AUTO_DISABLED=0", script)
         self.assertIn("bundle_includes_voice", script)
         self.assertIn("autostart_plan_label", script)
+        self.assertIn("installer_run_mode_label", script)
         self.assertIn("Voice included:", script)
+        self.assertIn("Run mode:", script)
         self.assertIn("--autostart", script)
         self.assertIn('SPARK_AUTOSTART="${SPARK_AUTOSTART:-1}"', script)
         self.assertIn("--no-autostart", script)
@@ -11116,6 +11159,7 @@ class SparkCliTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
         self.assertIn("Bundle:              telegram-voice-starter", result.stdout)
         self.assertIn("Voice included:      yes", result.stdout)
+        self.assertIn("Run mode:            unattended (non-TTY stdin)", result.stdout)
         self.assertIn("Autostart:           no; auto-disabled for --yes/non-interactive run", result.stdout)
         self.assertIn("--no-start-now --no-autostart", result.stdout)
         self.assertNotIn("--start-now --autostart", result.stdout)
@@ -11156,7 +11200,9 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("Apply-InstallDefaults", script)
         self.assertIn("Test-BundleIncludesVoice", script)
         self.assertIn("Format-AutostartPlan", script)
+        self.assertIn("Format-InstallerRunMode", script)
         self.assertIn("Voice included:", script)
+        self.assertIn("Run mode:", script)
         self.assertIn("Test-InstallSettings", script)
         self.assertIn("Refusing non-canonical Spark CLI source", script)
         self.assertIn("if ($RefWasProvided -and $Ref -and -not $AllowDevSource)", script)

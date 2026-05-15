@@ -206,6 +206,16 @@ autostart_plan_label() {
   fi
 }
 
+installer_run_mode_label() {
+  if [ "$SPARK_ASSUME_YES" = "1" ]; then
+    printf 'unattended (--yes)'
+  elif [ ! -t 0 ]; then
+    printf 'unattended (non-TTY stdin)'
+  else
+    printf 'interactive'
+  fi
+}
+
 cleanup_secret_files() {
   if [ "${#SPARK_SECRET_FILES[@]}" -gt 0 ]; then
     rm -f "${SPARK_SECRET_FILES[@]}"
@@ -560,6 +570,7 @@ Details:
   CLI commit:          $SPARK_CLI_REF
   Bundle:              $SPARK_BUNDLE
   Voice included:      $(bundle_includes_voice && printf yes || printf no)
+  Run mode:            $(installer_run_mode_label)
   Setup enabled:       $([ "$SPARK_SKIP_SETUP" = "1" ] && printf no || printf yes)
   Default provider:    $([ -n "$SPARK_LLM_PROVIDER" ] && printf '%s for Agent and Mission' "$SPARK_LLM_PROVIDER" || printf 'choose during spark setup')
   Shell profile edit:  $([ "$SPARK_SHELL_PROFILE" = "0" ] && printf no || printf "$SPARK_SHELL_PROFILE")
