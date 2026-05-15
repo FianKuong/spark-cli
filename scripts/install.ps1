@@ -603,6 +603,11 @@ function Write-Wrapper {
     $binDir = Join-Path $Script:SparkPrefix "bin"
     New-Item -ItemType Directory -Force -Path $binDir | Out-Null
     $wrapper = Join-Path $binDir "spark.cmd"
+    $legacyExe = Join-Path $binDir "spark.exe"
+    if (Test-Path -LiteralPath $legacyExe) {
+        Remove-Item -LiteralPath $legacyExe -Force
+        Write-SparkLog "Removed stale Spark executable shim $legacyExe"
+    }
     $pythonExe = Join-Path $VenvDir "Scripts\python.exe"
     $contents = @"
 @echo off

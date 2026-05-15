@@ -11141,6 +11141,8 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("Upgrading pip in Spark CLI virtualenv", script)
         self.assertIn("Installing Spark CLI package", script)
         self.assertIn("pip install -e", script)
+        self.assertIn('Remove-Item -LiteralPath $legacyExe -Force', script)
+        self.assertIn("Removed stale Spark executable shim", script)
         self.assertIn("$env:PATH = \"$nodeDir;$env:PATH\"", script)
         self.assertIn('set "SPARK_HOME=$Script:SparkPrefix"', script)
         self.assertIn("function Add-SparkBinToUserPath", script)
