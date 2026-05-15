@@ -8542,6 +8542,7 @@ class SparkCliTests(unittest.TestCase):
              patch("spark_cli.cli.dirty_update_modules", return_value=[(dirty, "M src/index.ts")]), \
              patch("spark_cli.cli.module_is_git_managed", return_value=True), \
              patch("spark_cli.cli.update_module_source", side_effect=fake_update), \
+             patch("spark_cli.cli.load_module", return_value=clean), \
              patch("spark_cli.cli.tracked_process_keys_for_module", return_value=[]), \
              patch("spark_cli.cli.run_module_hook") as hook, \
              patch("spark_cli.cli.load_json", return_value={"spark-intelligence-builder": {"installed_via": {"kind": "git", "target": "repo"}}}), \
@@ -8613,6 +8614,7 @@ class SparkCliTests(unittest.TestCase):
              patch("spark_cli.cli.stash_module_local_changes", return_value=(True, "Saved working directory")), \
              patch("spark_cli.cli.module_is_git_managed", return_value=True), \
              patch("spark_cli.cli.update_module_source", return_value=(True, "already at pinned commit abc123")), \
+             patch("spark_cli.cli.load_module", return_value=dirty), \
              patch("spark_cli.cli.tracked_process_keys_for_module", return_value=[]), \
              patch("spark_cli.cli.run_module_hook") as hook, \
              patch("spark_cli.cli.load_json", return_value={"spark-telegram-bot": {"installed_via": {"kind": "git", "target": "repo"}}}), \
