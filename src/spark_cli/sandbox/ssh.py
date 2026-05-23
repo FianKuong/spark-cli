@@ -407,7 +407,16 @@ def trust_ssh_target_host_key(
             if raw_line.strip() and not raw_line.startswith(f"{alias} "):
                 lines.append(raw_line)
     lines.append(scan.known_hosts_line)
-    known_hosts.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    import tempfile
+    fd, tmp_path = tempfile.mkstemp(dir=str(known_hosts.parent), prefix=".known_hosts_")
+    try:
+        os.write(fd, ("\n".join(lines) + "\n").encode("utf-8"))
+        os.close(fd)
+        os.replace(tmp_path, str(known_hosts))
+    except BaseException:
+        os.close(fd) if not os.get_inheritable(fd) else None
+        os.unlink(tmp_path)
+        raise
     try:
         known_hosts.chmod(0o600)
     except OSError:
