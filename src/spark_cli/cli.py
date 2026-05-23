@@ -12566,7 +12566,7 @@ def stop_module(name: str, pid: int) -> None:
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], check=False, capture_output=True)
     else:
         try:
-            os.killpg(pid, signal.SIGTERM)
+            os.killpg(os.getpgid(pid), signal.SIGTERM)
         except OSError:
             subprocess.run(["kill", str(pid)], check=False, capture_output=True)
     print(f"Stopped {name} (pid {pid})")
