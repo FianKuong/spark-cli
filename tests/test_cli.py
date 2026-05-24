@@ -113,6 +113,7 @@ from spark_cli.cli import (
     check_runtime_version_for_module,
     clear_install_progress,
     coerce_config_value,
+    codex_client_config_payload,
     dotted_get,
     dotted_set,
     dotted_unset,
@@ -154,6 +155,8 @@ from spark_cli.cli import (
     provider_test_payload,
     public_local_path_ref,
     resolve_provider_test_target,
+    save_codex_client_config,
+    update_toml_top_level_scalars,
     redact_for_llm,
     redact_shareable_text,
     redact_sensitive_text,
@@ -7893,6 +7896,90 @@ class SparkCliTests(unittest.TestCase):
         self.assertIn("OpenAI Codex subscription", output)
         self.assertIn("Local/private desktop route", output)
         self.assertIn("spark setup --llm-provider lmstudio", output)
+
+    def test_parser_accepts_codex_client_config_command(self) -> None:
+        args = build_parser().parse_args(["providers", "codex", "--service-tier", "fast", "--reasoning-effort", "high"])
+        self.assertEqual(args.providers_command, "codex")
+        self.assertEqual(args.service_tier, "fast")
+        self.assertEqual(args.reasoning_effort, "high")
+
+    def test_codex_client_config_payload_reads_safe_top_level_values(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config = Path(tmp_dir) / "config.toml"
+            config.write_text(
+                'model = "gpt-5.5"\n'
+                'model_reasoning_effort = "high"\n'
+                'service_tier = "fast"\n'
+                '\n'
+                '[profiles.other]\n'
+                'service_tier = "slow"\n',
+                encoding="utf-8",
+            )
+
+            payload = codex_client_config_payload({"CODEX_HOME": tmp_dir})
+
+        self.assertEqual(payload["ok"], True)
+        self.assertEqual(payload["values"]["model"], "gpt-5.5")
+        self.assertEqual(payload["values"]["model_reasoning_effort"], "high")
+        self.assertEqual(payload["values"]["service_tier"], "fast")
+        self.assertNotIn("slow", json.dumps(payload))
+
+    def test_save_codex_client_config_updates_top_level_values_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config = Path(tmp_dir) / "config.toml"
+            config.write_text(
+                'model = "gpt-5.4"\n'
+                '\n'
+                '[profiles.speed]\n'
+                'model_reasoning_effort = "medium"\n'
+                'service_tier = "default"\n',
+                encoding="utf-8",
+            )
+
+            payload = save_codex_client_config(
+                {"model": "gpt-5.5", "model_reasoning_effort": "high", "service_tier": "fast"},
+                {"CODEX_HOME": tmp_dir},
+            )
+            updated = config.read_text(encoding="utf-8")
+
+        self.assertEqual(payload["ok"], True)
+        self.assertEqual(payload["changed"], True)
+        self.assertIn('model = "gpt-5.5"', updated)
+        self.assertIn('model_reasoning_effort = "high"\nservice_tier = "fast"\n\n[profiles.speed]', updated)
+        self.assertIn('[profiles.speed]\nmodel_reasoning_effort = "medium"\nservice_tier = "default"', updated)
+
+    def test_update_toml_top_level_scalars_preserves_sections(self) -> None:
+        updated = update_toml_top_level_scalars(
+            'model = "old"\n\n[profiles.speed]\nservice_tier = "default"\n',
+            {"service_tier": "fast"},
+        )
+
+        self.assertIn('model = "old"', updated)
+        self.assertIn('service_tier = "fast"\n\n[profiles.speed]', updated)
+        self.assertIn('[profiles.speed]\nservice_tier = "default"', updated)
+
+    def test_provider_status_adds_codex_client_only_to_codex_roles(self) -> None:
+        setup = {
+            "llm": {
+                "provider": "codex",
+                "roles": {
+                    "chat": {"provider": "codex", "model": "gpt-5.5", "auth_mode": "codex_oauth"},
+                    "builder": {"provider": "openai", "model": "gpt-5.5", "auth_mode": "api_key"},
+                    "memory": {"provider": "codex", "model": "gpt-5.5", "auth_mode": "codex_oauth"},
+                    "mission": {"provider": "zai", "model": "glm-5.1", "auth_mode": "api_key"},
+                },
+            },
+            "secret_keys": [],
+        }
+        codex_payload = {"ok": True, "values": {"service_tier": "fast", "model_reasoning_effort": "high"}}
+        with patch("spark_cli.cli.load_json", return_value=setup), \
+             patch("spark_cli.cli.codex_client_config_payload", return_value=codex_payload):
+            payload = provider_status_payload()
+
+        self.assertEqual(payload["roles"]["chat"]["codex_client"], codex_payload)
+        self.assertEqual(payload["roles"]["memory"]["codex_client"], codex_payload)
+        self.assertNotIn("codex_client", payload["roles"]["builder"])
+        self.assertNotIn("codex_client", payload["roles"]["mission"])
 
     def test_cmd_recommend_llms_prints_same_normie_paths(self) -> None:
         args = build_parser().parse_args(["recommend", "llms"])

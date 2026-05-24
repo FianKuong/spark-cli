@@ -3063,6 +3063,8 @@ LLM_PROVIDER_AUTH_HINTS = {
     "minimax": "MINIMAX_API_KEY",
     "ollama": "local Ollama server",
 }
+CODEX_REASONING_EFFORTS = ("none", "minimal", "low", "medium", "high", "xhigh")
+CODEX_CLIENT_CONFIG_KEYS = ("model", "model_reasoning_effort", "service_tier")
 LLM_PROVIDER_GUIDANCE: dict[str, dict[str, Any]] = {
     "codex": {
         "lane": "paid/subscription",
@@ -8863,6 +8865,144 @@ def redact_for_llm(value: Any) -> Any:
     return value
 
 
+def codex_config_path(env: dict[str, str] | None = None) -> Path:
+    source = env if env is not None else os.environ
+    codex_home = str(source.get("CODEX_HOME") or "").strip()
+    if codex_home:
+        return Path(codex_home).expanduser() / "config.toml"
+    home = str(source.get("USERPROFILE") or source.get("HOME") or "").strip()
+    root = Path(home).expanduser() if home else Path.home()
+    return root / ".codex" / "config.toml"
+
+
+def _safe_codex_client_value(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, (str, int, float, bool)):
+        return str(value).strip()
+    return ""
+
+
+def codex_active_roles() -> list[str]:
+    payload = provider_status_payload()
+    roles = payload.get("roles") if isinstance(payload, dict) else {}
+    if not isinstance(roles, dict):
+        return []
+    active: list[str] = []
+    for role, state in roles.items():
+        if isinstance(state, dict) and state.get("provider") == "codex":
+            active.append(str(role))
+    return active
+
+
+def codex_client_config_payload(env: dict[str, str] | None = None) -> dict[str, Any]:
+    path = codex_config_path(env)
+    payload: dict[str, Any] = {
+        "provider": "codex",
+        "path": public_local_path_ref(path),
+        "exists": path.exists(),
+        "source": "codex_cli_config",
+        "editable": True,
+        "active_roles": [],
+        "values": {},
+        "notes": [],
+    }
+    if not path.exists():
+        payload["ok"] = False
+        payload["notes"].append("Codex config.toml was not found.")
+        return payload
+    try:
+        parsed = tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        payload["ok"] = False
+        payload["notes"].append(redact_sensitive_text(str(exc)))
+        return payload
+    values = {
+        key: _safe_codex_client_value(parsed.get(key))
+        for key in CODEX_CLIENT_CONFIG_KEYS
+        if _safe_codex_client_value(parsed.get(key))
+    }
+    payload["ok"] = True
+    payload["values"] = values
+    return payload
+
+
+def validate_codex_config_value(key: str, value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise SystemExit(f"{key} cannot be empty.")
+    if key == "model_reasoning_effort" and normalized not in CODEX_REASONING_EFFORTS:
+        raise SystemExit(f"model_reasoning_effort must be one of: {', '.join(CODEX_REASONING_EFFORTS)}")
+    if not re.match(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,127}$", normalized):
+        raise SystemExit(f"{key} contains unsupported characters.")
+    return normalized
+
+
+def toml_string(value: str) -> str:
+    return json.dumps(value)
+
+
+def update_toml_top_level_scalars(content: str, updates: dict[str, str]) -> str:
+    lines = content.splitlines()
+    seen: set[str] = set()
+    first_section_index = len(lines)
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            first_section_index = index
+            break
+        match = re.match(r"^(\s*)([A-Za-z_][A-Za-z0-9_]*)\s*=", line)
+        if not match:
+            continue
+        key = match.group(2)
+        if key in updates:
+            lines[index] = f"{match.group(1)}{key} = {toml_string(updates[key])}"
+            seen.add(key)
+    missing = [key for key in CODEX_CLIENT_CONFIG_KEYS if key in updates and key not in seen]
+    if missing:
+        inserted = [f"{key} = {toml_string(updates[key])}" for key in missing]
+        if first_section_index < len(lines):
+            inserted.append("")
+        lines[first_section_index:first_section_index] = inserted
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def atomic_write_text(path: Path, content: str) -> None:
+    assert_no_linked_write_path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_name(f".{path.name}.{os.getpid()}.{py_secrets.token_hex(4)}.tmp")
+    try:
+        temp_path.write_text(content, encoding="utf-8")
+        try:
+            os.chmod(temp_path, PRIVATE_FILE_MODE)
+        except OSError:
+            pass
+        os.replace(temp_path, path)
+        try:
+            os.chmod(path, PRIVATE_FILE_MODE)
+        except OSError:
+            pass
+    finally:
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except OSError:
+            pass
+
+
+def save_codex_client_config(updates: dict[str, str], env: dict[str, str] | None = None) -> dict[str, Any]:
+    normalized = {key: validate_codex_config_value(key, value) for key, value in updates.items() if value is not None}
+    path = codex_config_path(env)
+    before = path.read_text(encoding="utf-8") if path.exists() else ""
+    after = update_toml_top_level_scalars(before, normalized)
+    if after != before:
+        atomic_write_text(path, after)
+    payload = codex_client_config_payload(env)
+    payload["changed"] = after != before
+    payload["updated"] = sorted(normalized)
+    return payload
+
+
 def collect_llm_doctor_context(problem: str, *, include_logs: bool = False, log_lines: int = 80) -> dict[str, Any]:
     status_payload = collect_status_payload()
     context: dict[str, Any] = {
@@ -9929,6 +10069,8 @@ def provider_status_payload() -> dict[str, Any]:
             "base_url": state.get("base_url") or llm_state.get("base_url") or "",
             "ready": provider != "not_configured" and auth_mode != "not_configured",
         }
+        if provider == "codex" and auth_mode == "codex_oauth":
+            role_payload[role]["codex_client"] = codex_client_config_payload()
     repair_hints = build_llm_repair_hints({"provider": llm_state.get("provider"), "roles": role_payload})
     return {
         "ok": not repair_hints,
@@ -10031,9 +10173,46 @@ def cmd_providers(args: argparse.Namespace) -> int:
                 f"{marker} {role:<7} provider={state.get('provider', 'not_configured')} "
                 f"model={state.get('model') or 'not configured'} auth={state.get('auth_mode', 'not_configured')}"
             )
+            codex_client = state.get("codex_client") if isinstance(state, dict) else None
+            if isinstance(codex_client, dict) and codex_client.get("ok"):
+                values = codex_client.get("values") if isinstance(codex_client.get("values"), dict) else {}
+                tier = values.get("service_tier") or "default"
+                effort = values.get("model_reasoning_effort") or "default"
+                print(f"          codex_client service_tier={tier} reasoning={effort}")
         for hint in payload["repair_hints"]:
             print(f"Repair: {hint}")
         return 0 if payload["ok"] else 1
+    if args.providers_command == "codex":
+        updates = {
+            key: value
+            for key, value in {
+                "model": getattr(args, "model", None),
+                "model_reasoning_effort": getattr(args, "reasoning_effort", None),
+                "service_tier": getattr(args, "service_tier", None),
+            }.items()
+            if value is not None
+        }
+        payload = save_codex_client_config(updates) if updates else codex_client_config_payload()
+        payload["active_roles"] = codex_active_roles()
+        if args.json:
+            print(json.dumps(payload, indent=2))
+            return 0 if payload.get("ok") else 1
+        print("Spark Codex client config")
+        print("")
+        if payload.get("active_roles"):
+            print(f"Active Spark roles: {', '.join(payload['active_roles'])}")
+        else:
+            print("Active Spark roles: none currently using Codex")
+        values = payload.get("values") if isinstance(payload.get("values"), dict) else {}
+        print(f"model: {values.get('model') or 'default'}")
+        print(f"reasoning: {values.get('model_reasoning_effort') or 'default'}")
+        print(f"service_tier: {values.get('service_tier') or 'default'}")
+        if payload.get("updated"):
+            changed = "updated" if payload.get("changed") else "already set"
+            print(f"Change: {changed} ({', '.join(payload['updated'])})")
+        for note in payload.get("notes", []):
+            print(f"Note: {note}")
+        return 0 if payload.get("ok") else 1
     if args.providers_command == "test":
         payload = provider_test_payload(role=args.role, provider=args.provider)
         if args.json:
@@ -14571,6 +14750,12 @@ def build_parser() -> argparse.ArgumentParser:
     providers_status_parser = providers_sub.add_parser("status", help="Show chat/build/memory/mission provider readiness")
     providers_status_parser.add_argument("--json", action="store_true")
     providers_status_parser.set_defaults(func=cmd_providers)
+    providers_codex_parser = providers_sub.add_parser("codex", help="Inspect or update Codex CLI client config when Spark uses Codex")
+    providers_codex_parser.add_argument("--model", help="Set the top-level Codex CLI model")
+    providers_codex_parser.add_argument("--reasoning-effort", choices=CODEX_REASONING_EFFORTS, help="Set Codex CLI reasoning effort")
+    providers_codex_parser.add_argument("--service-tier", help="Set Codex CLI service tier, for example fast")
+    providers_codex_parser.add_argument("--json", action="store_true")
+    providers_codex_parser.set_defaults(func=cmd_providers)
     providers_test_parser = providers_sub.add_parser("test", help="Send a tiny PING_OK probe through one configured role")
     providers_test_parser.add_argument("--role", choices=LLM_ROLES, default="chat", help="LLM role to test")
     providers_test_parser.add_argument("--provider", choices=LLM_PROVIDER_CHOICES, help="Override the configured provider")
