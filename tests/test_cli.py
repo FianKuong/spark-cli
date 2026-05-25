@@ -5755,8 +5755,11 @@ class SparkCliTests(unittest.TestCase):
                 self.assertEqual(cmd_setup(args), 0)
 
         output = stdout.getvalue()
-        self.assertIn("Spark command was upgraded.", output)
-        self.assertIn("Setup refresh paused", output)
+        self.assertIn("Spark upgrade status", output)
+        self.assertIn("[OK] CLI upgrade: complete", output)
+        self.assertIn("[PAUSED] Setup refresh: secrets need a secure backend before Spark rewrites them", output)
+        self.assertIn("[OK] Existing runtime: can keep running with the current setup", output)
+        self.assertIn("Next when you are ready:", output)
         self.assertIn("spark setup telegram-starter --resume", output)
 
     def test_print_install_summary_mentions_ingress_owner(self) -> None:

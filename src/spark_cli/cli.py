@@ -5732,15 +5732,15 @@ def setup_upgrade_refresh_can_pause(args: argparse.Namespace, detail: str) -> bo
 def print_setup_upgrade_refresh_paused(args: argparse.Namespace) -> None:
     bundle = str(getattr(args, "bundle", "telegram-starter") or "telegram-starter")
     print("")
-    print("Spark command was upgraded.")
-    print(
-        "Setup refresh paused because this machine cannot securely rewrite stored secrets "
-        "from a non-interactive upgrade."
-    )
-    print("Your existing install can keep running. When you are ready, resume setup:")
+    print("Spark upgrade status")
+    print("  [OK] CLI upgrade: complete")
+    print("  [PAUSED] Setup refresh: secrets need a secure backend before Spark rewrites them")
+    print("  [OK] Existing runtime: can keep running with the current setup")
+    print("")
+    print("Next when you are ready:")
     print(f"  spark setup {bundle} --resume")
     print("")
-    print("For now:")
+    print("To keep working now:")
     print(f"  spark start {bundle}")
     print("  spark live status")
 
