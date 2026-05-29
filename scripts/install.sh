@@ -893,7 +893,7 @@ install_cli_venv() {
   log "Installing Spark CLI package with browser-use support"
   "$venv_dir/bin/python" -m pip install -e "$cli_dir[browser-use]"
   log "Installing browser-use Chromium dependency"
-  PATH="$venv_dir/bin:$uv_dir:$PATH" "$venv_dir/bin/browser-use" install >/dev/null
+  PYTHONIOENCODING=utf-8 PYTHONUTF8=1 PATH="$venv_dir/bin:$uv_dir:$PATH" "$venv_dir/bin/browser-use" install >/dev/null
 }
 
 write_wrapper() {
