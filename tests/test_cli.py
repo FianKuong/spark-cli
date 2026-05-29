@@ -1675,13 +1675,23 @@ class SparkCliTests(unittest.TestCase):
             resolve_secret_input("@env:SPARK_TEST_SECRET_MISSING")
 
     def test_resolve_secret_input_can_read_file_reference(self) -> None:
-        with tempfile.NamedTemporaryFile("w", encoding="utf-8", delete=False) as handle:
-            handle.write("secret-from-file\n")
-            secret_path = Path(handle.name)
-        try:
-            self.assertEqual(resolve_secret_input(f"@file:{secret_path}"), "secret-from-file")
-        finally:
-            secret_path.unlink(missing_ok=True)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            spark_home = Path(tmpdir) / "spark-home"
+            secret_path = spark_home / "config" / "secret.txt"
+            secret_path.parent.mkdir(parents=True)
+            secret_path.write_text("secret-from-file\n", encoding="utf-8")
+            with patch("spark_cli.cli.SPARK_HOME", spark_home):
+                self.assertEqual(resolve_secret_input(f"@file:{secret_path}"), "secret-from-file")
+
+    def test_resolve_secret_input_rejects_file_reference_outside_spark_home(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            spark_home = root / "spark-home"
+            outside_secret = root / "outside-secret.txt"
+            outside_secret.write_text("secret-from-file\n", encoding="utf-8")
+            with patch("spark_cli.cli.SPARK_HOME", spark_home), self.assertRaises(SystemExit) as error:
+                resolve_secret_input(f"@file:{outside_secret}")
+            self.assertIn("inside SPARK_HOME", str(error.exception))
 
     def test_llm_doctor_redacts_tokens_and_secret_fields(self) -> None:
         text = "BOT_TOKEN=1234567890:AAabcdefghijklmnopqrstuvwxyz1234567890 and Authorization: Bearer sk-proj-secretvalue1234567890"

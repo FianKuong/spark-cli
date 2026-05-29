@@ -2167,6 +2167,17 @@ def telegram_token_repair_command(secret_id: str) -> str:
     return "spark telegram connect"
 
 
+def secret_file_path_inside_spark_home(secret_path: Path, spark_home: Path = SPARK_HOME) -> bool:
+    try:
+        candidate = secret_path.expanduser().resolve(strict=False)
+        root = spark_home.expanduser().resolve(strict=False)
+        candidate_text = os.path.normcase(str(candidate))
+        root_text = os.path.normcase(str(root))
+        return os.path.commonpath([candidate_text, root_text]) == root_text
+    except (OSError, ValueError):
+        return False
+
+
 def resolve_secret_input(value: str) -> str:
     stripped = value.strip()
     if stripped.lower() == "@clipboard":
@@ -2183,8 +2194,11 @@ def resolve_secret_input(value: str) -> str:
         secret_path = stripped[6:].strip()
         if not secret_path:
             raise SystemExit("Invalid secret reference: @file: requires a path.")
+        path = Path(secret_path)
+        if not secret_file_path_inside_spark_home(path, SPARK_HOME):
+            raise SystemExit("Invalid secret reference: @file: paths must stay inside SPARK_HOME.")
         try:
-            return Path(secret_path).expanduser().read_text(encoding="utf-8").strip()
+            return path.expanduser().read_text(encoding="utf-8").strip()
         except OSError as exc:
             raise SystemExit(f"Could not read secret file {secret_path}: {exc}") from exc
     return value
