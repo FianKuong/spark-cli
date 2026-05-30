@@ -146,11 +146,25 @@ class BrowserUseCliTests(unittest.TestCase):
         )
 
     def test_install_dry_run_is_non_mutating(self) -> None:
-        with patch("spark_cli.cli.subprocess.run") as run:
+        with patch("spark_cli.cli.subprocess.run") as run, \
+             patch("builtins.print") as printed:
             exit_code = cli.cmd_browser_use(Namespace(browser_use_command="install", dry_run=True))
 
         self.assertEqual(exit_code, 0)
         run.assert_not_called()
+        lines = [str(call.args[0]) for call in printed.call_args_list if call.args]
+        self.assertTrue(any("pip install -e" in line for line in lines))
+
+    def test_discovers_checkout_root_from_current_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir) / "spark-cli"
+            nested = root / "nested"
+            (root / "scripts").mkdir(parents=True)
+            nested.mkdir()
+            (root / "pyproject.toml").write_text("[project]\nname='spark-cli'\n", encoding="utf-8")
+            (root / "scripts" / "install.sh").write_text("#!/usr/bin/env sh\n", encoding="utf-8")
+            with patch("spark_cli.cli.Path.cwd", return_value=nested):
+                self.assertEqual(cli.discover_repo_root(), root)
 
     def test_open_returns_page_summary_receipt(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

@@ -69,7 +69,20 @@ KEYCHAIN_SERVICE = "spark-cli"
 AUTOSTART_SERVICE_NAME = "spark-telegram-agent"
 AUTOSTART_LAUNCHD_LABEL = "ai.sparkswarm.spark-telegram-agent"
 AUTOSTART_WINDOWS_TASK_NAME = "Spark Telegram Agent"
-REPO_ROOT = Path(__file__).resolve().parents[2]
+def discover_repo_root() -> Path:
+    env_root = os.environ.get("SPARK_CLI_SOURCE_ROOT")
+    candidates = []
+    if env_root:
+        candidates.append(Path(env_root).expanduser())
+    cwd = Path.cwd().resolve()
+    candidates.extend([cwd, *cwd.parents, Path(__file__).resolve().parents[2]])
+    for candidate in candidates:
+        if (candidate / "pyproject.toml").exists() and (candidate / "scripts" / "install.sh").exists():
+            return candidate
+    return Path(__file__).resolve().parents[2]
+
+
+REPO_ROOT = discover_repo_root()
 LOCAL_REGISTRY_PATH = REPO_ROOT / "registry.json"
 INSTALLER_MANIFEST_PATH = REPO_ROOT / "scripts" / "installer-manifest.json"
 INSTALLER_SCRIPT_PATHS = {
@@ -2167,6 +2180,17 @@ def telegram_token_repair_command(secret_id: str) -> str:
     return "spark telegram connect"
 
 
+def secret_file_path_inside_spark_home(secret_path: Path, spark_home: Path = SPARK_HOME) -> bool:
+    try:
+        candidate = secret_path.expanduser().resolve(strict=False)
+        root = spark_home.expanduser().resolve(strict=False)
+        candidate_text = os.path.normcase(str(candidate))
+        root_text = os.path.normcase(str(root))
+        return os.path.commonpath([candidate_text, root_text]) == root_text
+    except (OSError, ValueError):
+        return False
+
+
 def resolve_secret_input(value: str) -> str:
     stripped = value.strip()
     if stripped.lower() == "@clipboard":
@@ -2183,8 +2207,11 @@ def resolve_secret_input(value: str) -> str:
         secret_path = stripped[6:].strip()
         if not secret_path:
             raise SystemExit("Invalid secret reference: @file: requires a path.")
+        path = Path(secret_path)
+        if not secret_file_path_inside_spark_home(path, SPARK_HOME):
+            raise SystemExit("Invalid secret reference: @file: paths must stay inside SPARK_HOME.")
         try:
-            return Path(secret_path).expanduser().read_text(encoding="utf-8").strip()
+            return path.expanduser().read_text(encoding="utf-8").strip()
         except OSError as exc:
             raise SystemExit(f"Could not read secret file {secret_path}: {exc}") from exc
     return value
@@ -5795,6 +5822,8 @@ def run_browser_use_command(cli_path: str, *parts: str, timeout: int = 45) -> su
         [cli_path, *parts],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=timeout,
         check=True,
         env=env,
@@ -6403,12 +6432,12 @@ def cmd_browser_use(args: argparse.Namespace) -> int:
         if getattr(args, "dry_run", False):
             print("Spark browser-use install preview")
             print("Would run:")
-            print(f"  {sys.executable} -m pip install {REPO_ROOT}[browser-use]")
+            print(f"  {sys.executable} -m pip install -e {REPO_ROOT}[browser-use]")
             print("  browser-use install")
             print("  browser-use doctor")
             print("Then run: spark browser-use probe")
             return 0
-        subprocess.run([sys.executable, "-m", "pip", "install", f"{REPO_ROOT}[browser-use]"], check=True)
+        subprocess.run([sys.executable, "-m", "pip", "install", "-e", f"{REPO_ROOT}[browser-use]"], check=True)
         cli_path = browser_use_cli_path()
         if not cli_path:
             raise SystemExit("browser-use installed, but the browser-use CLI is not on PATH. Restart the terminal or check the Spark Python environment.")
